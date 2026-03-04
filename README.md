@@ -66,6 +66,13 @@ uv run python run.py --yaml examples/sales_router_condition.yaml "quiero comprar
 
 # Modo chat interactivo multi-turno
 uv run python run.py --yaml examples/sales_router.yaml --chat
+
+uv run python run.py --yaml examples/01_evaluator_loop.yaml "inteligencia artificial en medicina"
+uv run python run.py --yaml examples/02_sequential_pipeline.yaml "me cobraron dos veces el mes pasado"
+uv run python run.py --yaml examples/03_tool_plus_agent.yaml  # requiere user_id en state
+uv run python run.py --yaml examples/04_supervisor.yaml "no puedo acceder a mi cuenta"
+uv run python run.py --yaml examples/05_error_handling.yaml "procesa esto"
+
 ```
 
 ---

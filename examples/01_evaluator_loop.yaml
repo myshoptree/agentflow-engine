@@ -1,0 +1,98 @@
+id: evaluator-loop
+version: "1.0.0"
+name: Evaluator Loop — genera y evalúa hasta alcanzar calidad mínima
+entry_node: writer
+
+# Patrón: AgentNode genera contenido → AgentNode evalúa con score numérico
+# → si score < 0.8 vuelve a writer (loop) → si score >= 0.8 continúa
+# max_depth actúa como guardia de seguridad contra loops infinitos
+
+state_schema:
+  - name: topic
+    type: str
+    required: true
+  - name: draft
+    type: str
+    default: ""
+  - name: feedback
+    type: str
+    default: ""
+  - name: score
+    type: float
+    default: 0.0
+  - name: iterations
+    type: int
+    default: 0
+
+global_timeout_seconds: 120
+max_depth: 20  # máximo 10 iteraciones writer+evaluator antes de forzar salida
+
+nodes:
+  writer:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un redactor experto. Tu tarea es escribir un párrafo conciso y de alta calidad
+        sobre el tema indicado en `topic`.
+
+        Si recibes `feedback` no vacío, úsalo para mejorar el `draft` anterior.
+        Si no hay feedback, escribe desde cero.
+
+        El párrafo debe ser claro, específico y tener entre 3 y 5 oraciones.
+      output_schema: "examples.schemas.DraftOutput"
+      state_output_mapping:
+        draft: draft
+
+  evaluator:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un evaluador de contenido. Evalúa el `draft` recibido con criterios de:
+        - Claridad (¿es fácil de entender?)
+        - Especificidad (¿da información concreta?)
+        - Concisión (¿es directo sin ser escueto?)
+
+        Devuelve un score de 0.0 a 1.0 y feedback específico sobre qué mejorar.
+        Si el score es >= 0.8, el feedback puede ser vacío.
+      output_schema: "examples.schemas.EvalOutput"
+      state_output_mapping:
+        score: score
+        feedback: feedback
+
+  check_quality:
+    type: condition
+    config:
+      branches:
+        - condition:
+            field: state.score
+            operator: gte
+            value: 0.8
+          target: publisher
+      default: writer  # score bajo → vuelve a writer con feedback
+
+  publisher:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        El contenido ha pasado el control de calidad. Preséntalo de forma final,
+        con un título apropiado y el texto pulido. Responde solo con el contenido final.
+      output_schema: "examples.schemas.PublishedOutput"
+      state_output_mapping:
+        draft: final_content
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: writer
+    to_node: evaluator
+
+  - from_node: evaluator
+    to_node: check_quality
+
+  - from_node: publisher
+    to_node: end

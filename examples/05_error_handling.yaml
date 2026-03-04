@@ -1,0 +1,86 @@
+id: error-handling
+version: "1.0.0"
+name: Error Handling — on_error routing y fallback graceful
+entry_node: risky_agent
+
+# Patrón: nodo principal con on_error definido → si falla después de reintentos,
+# el runtime lo redirige al error_handler en vez de terminar en FAILED directamente.
+# El error_handler genera una respuesta de fallback elegante para el usuario.
+# Demuestra SPEC §5.2: on_error routing antes de FAILED.
+
+# Para forzar el error en demo: pasar user_input="FORCE_ERROR"
+# El risky_agent lanza excepción si detecta esa señal en su prompt.
+
+state_schema:
+  - name: user_input
+    type: str
+    required: true
+  - name: result
+    type: str
+    default: ""
+  - name: error_context
+    type: str
+    default: ""
+
+global_timeout_seconds: 30
+max_depth: 10
+
+nodes:
+  risky_agent:
+    type: agent
+    on_error: error_handler   # si falla → ir a error_handler, no FAILED
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Procesa la solicitud del usuario y genera un resultado estructurado.
+        Si el mensaje contiene "FORCE_ERROR", responde exactamente con:
+        {"result": "ERROR_TRIGGERED"} y lanza una excepción interna.
+        De lo contrario, procesa normalmente y devuelve el resultado.
+      output_schema: "examples.schemas.ResultOutput"
+      state_output_mapping:
+        result: result
+      retry_policy:
+        max_retries: 2
+        backoff_base: 1.0
+        backoff_multiplier: 2.0
+        backoff_max: 5.0
+
+  check_result:
+    type: condition
+    config:
+      branches:
+        - condition:
+            field: state.result
+            operator: neq
+            value: ""
+          target: success_end
+      default: error_handler
+
+  error_handler:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Hubo un error procesando la solicitud del usuario. Genera una respuesta
+        amable y profesional explicando que ocurrió un problema temporal y que
+        el equipo ha sido notificado. Ofrece alternativas de contacto.
+        No menciones detalles técnicos del error.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        result: response
+
+  success_end:
+    type: end
+    config: {}
+
+  error_end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: risky_agent
+    to_node: check_result
+  - from_node: check_result
+    to_node: success_end
+  - from_node: error_handler
+    to_node: error_end

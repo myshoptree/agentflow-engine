@@ -1,0 +1,95 @@
+id: sequential-pipeline
+version: "1.0.0"
+name: Pipeline Secuencial — enriquecimiento progresivo del estado
+entry_node: extractor
+
+# Patrón: cada agente recibe el estado completo y añade su capa de análisis.
+# El estado crece en cada paso: extractor → analyzer → strategist → responder
+
+state_schema:
+  - name: customer_message
+    type: str
+    required: true
+  - name: entities
+    type: str
+    default: ""
+  - name: sentiment
+    type: str
+    default: ""
+  - name: intent
+    type: str
+    default: ""
+  - name: strategy
+    type: str
+    default: ""
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 120
+max_depth: 10
+
+nodes:
+  extractor:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Extrae entidades del mensaje del cliente: nombres de productos, fechas, números,
+        nombres propios y términos técnicos relevantes.
+        Devuelve una lista separada por comas. Si no hay entidades, devuelve "ninguna".
+      output_schema: "examples.schemas.ExtractorOutput"
+      state_output_mapping:
+        entities: entities
+
+  analyzer:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Analiza el mensaje del cliente y las entidades extraídas.
+        Determina:
+        - sentiment: "positivo", "negativo" o "neutro"
+        - intent: una de estas categorías: "queja", "consulta", "compra", "cancelacion", "felicitacion", "otro"
+      output_schema: "examples.schemas.AnalyzerOutput"
+      state_output_mapping:
+        sentiment: sentiment
+        intent: intent
+
+  strategist:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un estratega de atención al cliente. Con base en el mensaje, entidades,
+        sentimiento e intención, define la estrategia de respuesta óptima en 1 oración.
+        Ejemplo: "Disculparse primero, luego ofrecer solución concreta con plazo."
+      output_schema: "examples.schemas.StrategyOutput"
+      state_output_mapping:
+        strategy: strategy
+
+  responder:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Redacta la respuesta final al cliente siguiendo la estrategia definida.
+        Sé empático, profesional y conciso. Máximo 3 oraciones.
+        Usa el tono apropiado según el sentimiento detectado.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: extractor
+    to_node: analyzer
+  - from_node: analyzer
+    to_node: strategist
+  - from_node: strategist
+    to_node: responder
+  - from_node: responder
+    to_node: end

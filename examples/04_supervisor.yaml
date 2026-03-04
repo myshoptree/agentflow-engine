@@ -1,0 +1,145 @@
+id: supervisor
+version: "1.0.0"
+name: Supervisor — orquestador que delega a especialistas
+entry_node: supervisor
+
+# Patrón: un AgentNode supervisor analiza la solicitud y decide
+# a qué especialista derivar. Cada especialista tiene su propio
+# sistema de prompts y área de expertise.
+# El ConditionNode lee la decisión del supervisor y rutea.
+
+state_schema:
+  - name: user_request
+    type: str
+    required: true
+  - name: specialist
+    type: str
+    default: ""
+  - name: reasoning
+    type: str
+    default: ""
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 90
+max_depth: 10
+
+nodes:
+  supervisor:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un supervisor de equipo de soporte técnico. Analiza la solicitud del usuario
+        y decide qué especialista debe atenderla. Los especialistas disponibles son:
+
+        - "billing": problemas de facturación, pagos, reembolsos, cargos incorrectos
+        - "technical": bugs, errores de sistema, problemas de integración, API
+        - "account": cambios de cuenta, accesos, permisos, configuración de perfil
+        - "sales": preguntas sobre planes, upgrades, precios, nuevas funciones
+
+        Devuelve el nombre del especialista y tu razonamiento en una oración.
+      output_schema: "examples.schemas.SupervisorOutput"
+      state_output_mapping:
+        specialist: specialist
+        reasoning: reasoning
+
+  route_to_specialist:
+    type: condition
+    config:
+      branches:
+        - condition:
+            field: state.specialist
+            operator: eq
+            value: "billing"
+          target: billing_agent
+        - condition:
+            field: state.specialist
+            operator: eq
+            value: "technical"
+          target: technical_agent
+        - condition:
+            field: state.specialist
+            operator: eq
+            value: "account"
+          target: account_agent
+        - condition:
+            field: state.specialist
+            operator: eq
+            value: "sales"
+          target: sales_agent
+      default: general_agent
+
+  billing_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres el especialista en facturación. Resuelve problemas de pagos, reembolsos
+        y cargos. Sé preciso con números y plazos. Menciona siempre los pasos concretos.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  technical_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres el especialista técnico. Diagnostica problemas de sistema, bugs e integraciones.
+        Da soluciones paso a paso con ejemplos de código cuando sea relevante.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  account_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres el especialista en gestión de cuentas. Resuelve problemas de acceso,
+        permisos y configuración. Sé claro sobre qué acciones requieren verificación.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  sales_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres el especialista en ventas. Presenta opciones de planes con claridad,
+        destaca el valor diferencial y facilita la decisión sin presionar.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  general_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un agente de soporte general. Responde lo mejor posible y si necesitas
+        escalar a un especialista, indícalo claramente al usuario.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: supervisor
+    to_node: route_to_specialist
+  - from_node: billing_agent
+    to_node: end
+  - from_node: technical_agent
+    to_node: end
+  - from_node: account_agent
+    to_node: end
+  - from_node: sales_agent
+    to_node: end
+  - from_node: general_agent
+    to_node: end

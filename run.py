@@ -22,6 +22,9 @@ from agentflow.core.models import GraphDefinition, MessageRole
 from agentflow.core.runtime import ExecutionRuntime
 from agentflow.core.session_manager import InMemorySessionManager
 from agentflow.core.state_manager import InMemoryStateManager
+from examples.tools import register_example_tools
+
+register_example_tools()
 
 
 # ---------------------------------------------------------------------------

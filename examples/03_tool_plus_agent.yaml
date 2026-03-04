@@ -1,0 +1,112 @@
+id: tool-plus-agent
+version: "1.0.0"
+name: Tool + Agent — enriquecimiento con datos externos antes de responder
+entry_node: load_context
+
+# Patrón: ToolNode carga datos del "sistema externo" (simulado) →
+# AgentNode usa esos datos para dar una respuesta personalizada y precisa.
+# Demuestra cómo el estado se construye con datos no-LLM antes de invocar el LLM.
+
+# Para ejecutar este ejemplo, registrar las tools antes de correr:
+#   from examples.tools import register_example_tools
+#   register_example_tools()
+
+state_schema:
+  - name: user_id
+    type: str
+    required: true
+  - name: question
+    type: str
+    required: true
+  - name: user_name
+    type: str
+    default: ""
+  - name: plan
+    type: str
+    default: ""
+  - name: usage_percent
+    type: float
+    default: 0.0
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 60
+max_depth: 10
+
+nodes:
+  load_context:
+    type: tool
+    config:
+      tool_name: "get_user_context"
+      input_mapping:
+        user_id: user_id
+      output_mapping:
+        user_name: name
+        plan: plan
+        usage_percent: usage_percent
+
+  check_usage:
+    type: condition
+    config:
+      branches:
+        - condition:
+            field: state.usage_percent
+            operator: gte
+            value: 90.0
+          target: alert_agent
+        - condition:
+            field: state.usage_percent
+            operator: gte
+            value: 70.0
+          target: advisory_agent
+      default: support_agent
+
+  alert_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        El usuario está al límite de su plan. Responde a su pregunta pero incluye
+        urgentemente una recomendación de upgrade. Sé directo y servicial.
+        Usa su nombre y menciona su plan actual.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  advisory_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        El usuario está usando entre 70% y 89% de su plan. Responde su pregunta
+        y menciona sutilmente que podría considerar un upgrade pronto.
+        Sé amable y no presiones.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  support_agent:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un agente de soporte. Responde la pregunta del usuario de forma
+        personalizada usando su nombre y contexto de su plan. Sé conciso y útil.
+      output_schema: "examples.schemas.ResponderOutput"
+      state_output_mapping:
+        response: response
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: load_context
+    to_node: check_usage
+  - from_node: alert_agent
+    to_node: end
+  - from_node: advisory_agent
+    to_node: end
+  - from_node: support_agent
+    to_node: end
