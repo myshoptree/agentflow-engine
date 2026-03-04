@@ -1,0 +1,28 @@
+[project]
+name = "agentflow"
+version = "0.1.0"
+description = "Agent Graph Engine — runtime for orchestrating LLM agent graphs"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-ai>=0.0.14",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["agentflow/tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentflow", "examples"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]

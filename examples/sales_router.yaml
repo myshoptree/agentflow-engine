@@ -1,0 +1,113 @@
+id: sales-router
+version: "1.0.0"
+name: Sales Router — clasifica intención y responde
+entry_node: classifier
+
+state_schema:
+  - name: user_input
+    type: str
+    required: true
+  - name: intent
+    type: str
+    default: ""
+  - name: confidence
+    type: float
+    default: 0.0
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 60
+max_depth: 10
+
+nodes:
+  classifier:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un clasificador de intención de ventas.
+        Analiza el mensaje del usuario y clasifica su intención:
+        - HOT: quiere comprar ahora, pregunta por precio o disponibilidad inmediata
+        - WARM: interesado pero necesita más información antes de decidir
+        - COLD: solo está explorando, sin intención clara de compra
+
+        Devuelve tu clasificación con un valor de confianza entre 0.0 y 1.0.
+      output_schema: "examples.schemas.ClassifierOutput"
+      state_output_mapping:
+        intent: intent
+        confidence: confidence
+      max_retries: 2
+
+  closer:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un agente de cierre de ventas. El usuario tiene alta intención de compra.
+        Sé directo, entusiasta y ofrece una llamada de acción clara.
+        Responde en español, máximo 2 oraciones.
+      output_schema: "examples.schemas.ResponseOutput"
+      state_output_mapping:
+        response: response
+      max_retries: 2
+
+  educator:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un agente educativo de ventas. El usuario tiene interés pero necesita más información.
+        Explica los beneficios del producto de forma amigable y sin presión.
+        Responde en español, máximo 2 oraciones.
+      output_schema: "examples.schemas.ResponseOutput"
+      state_output_mapping:
+        response: response
+      max_retries: 2
+
+  nurture:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Eres un agente de nurturing. El usuario está en fase exploratoria.
+        Sé amable, no vendas, genera curiosidad y deja la puerta abierta.
+        Responde en español, máximo 2 oraciones.
+      output_schema: "examples.schemas.ResponseOutput"
+      state_output_mapping:
+        response: response
+      max_retries: 2
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: classifier
+    to_node: closer
+    condition:
+      field: state.intent
+      operator: eq
+      value: "HOT"
+    priority: 30
+
+  - from_node: classifier
+    to_node: educator
+    condition:
+      field: state.intent
+      operator: eq
+      value: "WARM"
+    priority: 20
+
+  - from_node: classifier
+    to_node: nurture
+    priority: 0
+
+  - from_node: closer
+    to_node: end
+
+  - from_node: educator
+    to_node: end
+
+  - from_node: nurture
+    to_node: end
