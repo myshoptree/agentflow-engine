@@ -115,13 +115,13 @@ async def send_message(
     initial_input["user_input"] = message
     initial_input["conversation_history"] = history_for_llm
 
-    # Run graph
+    # Run graph — handle suspend/resume loop for human_input nodes
     exec_state = await state_manager.create_execution(graph_def, initial_input)
     runtime = ExecutionRuntime(state_manager)
-    final = await runtime.run(compiled, exec_state)
+    final = await _run_with_human_input(runtime, compiled, exec_state, state_manager, graph_def)
 
     graph_state = final.graph_state
-    response = graph_state.get("response") or graph_state.get("output") or ""
+    response = graph_state.get("response") or graph_state.get("result") or graph_state.get("output") or ""
     if not response and final.error_message:
         response = f"[Error: {final.error_message}]"
 
@@ -141,6 +141,70 @@ async def send_message(
         "status": final.status.value,
         "depth": final.depth,
     }
+
+
+async def _run_with_human_input(
+    runtime: ExecutionRuntime,
+    compiled,
+    exec_state,
+    state_manager: InMemoryStateManager,
+    graph_def,
+):
+    """
+    Run the graph handling human_input suspensions interactively.
+    When the execution suspends, prompts the user for input and resumes.
+    """
+    from agentflow.core.models import ExecutionStatus
+
+    final = await runtime.run(compiled, exec_state)
+
+    while final.status == ExecutionStatus.SUSPENDED:
+        graph_state = final.graph_state
+        action_summary = graph_state.get("action_summary", "")
+        impact_level = graph_state.get("impact_level", "")
+
+        print(f"\n{'─'*50}")
+        print(f"  ⏸  Ejecución suspendida — se requiere input humano")
+        if action_summary:
+            impact_tag = {"alto": "🔴 ALTO", "medio": "🟡 MEDIO", "bajo": "🟢 BAJO"}.get(impact_level, impact_level.upper())
+            print(f"\n  Acción: {action_summary}")
+            print(f"  Impacto: {impact_tag}")
+        print(f"{'─'*50}")
+
+        try:
+            human_input = input("  Tu respuesta: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelado por el usuario.")
+            break
+
+        # Find the input_mapping from the human_input node config to know which key to set
+        # Default to the next node's expected field; use "confirmation" as fallback
+        input_key = _find_human_input_key(compiled, final.current_node)
+
+        resumed = await state_manager.resume(
+            final.execution_id,
+            {input_key: human_input},
+        )
+        final = await runtime.run(compiled, resumed)
+
+    return final
+
+
+def _find_human_input_key(compiled, next_node_id: str | None) -> str:
+    """
+    Walk the compiled graph to find the human_input node that preceded next_node_id
+    and extract the first key from its input_mapping. Falls back to 'confirmation'.
+    """
+    from agentflow.core.models import NodeType
+
+    for node_id, compiled_node in compiled.nodes.items():
+        node_def = compiled_node.definition
+        if node_def.type != NodeType.HUMAN_INPUT:
+            continue
+        input_mapping = node_def.config.get("input_mapping", {})
+        if input_mapping:
+            return next(iter(input_mapping.keys()))
+    return "confirmation"
 
 
 async def run_single(message: str, yaml_path: str) -> None:

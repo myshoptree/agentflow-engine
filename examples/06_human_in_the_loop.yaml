@@ -1,0 +1,111 @@
+id: human-in-the-loop
+version: "1.0.0"
+name: Human-in-the-loop — confirmación humana antes de ejecutar acción
+entry_node: analyzer
+
+# Patrón: el grafo se suspende en human_input esperando confirmación del usuario.
+# Flujo:
+#   1. analyzer clasifica la solicitud y calcula el impacto
+#   2. human_input suspende → muestra resumen al usuario y pide confirmación
+#   3. check_confirmation evalúa la respuesta humana
+#   4. Si confirma → executor procesa la acción
+#   5. Si cancela → canceller responde con cancelación elegante
+
+state_schema:
+  - name: user_request
+    type: str
+    required: true
+  - name: action_summary
+    type: str
+    default: ""
+  - name: impact_level
+    type: str
+    default: ""
+  - name: confirmation
+    type: str
+    default: ""
+  - name: result
+    type: str
+    default: ""
+
+global_timeout_seconds: 300  # 5 min para que el humano responda
+max_depth: 10
+
+nodes:
+  analyzer:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        Analiza la solicitud del usuario y prepara un resumen de la acción a ejecutar.
+        Determina el nivel de impacto: "alto", "medio" o "bajo".
+
+        - alto: acciones irreversibles (eliminar datos, enviar comunicaciones masivas, cargos económicos)
+        - medio: cambios importantes pero reversibles (cambiar configuración, modificar registros)
+        - bajo: consultas o cambios menores
+
+        Devuelve un resumen claro de QUÉ se va a hacer (máximo 2 oraciones) y el nivel de impacto.
+      output_schema: "examples.schemas.ActionAnalysisOutput"
+      state_output_mapping:
+        action_summary: action_summary
+        impact_level: impact_level
+
+  await_confirmation:
+    type: human_input
+    config:
+      prompt: "¿Confirmas esta acción?"
+      input_mapping:
+        confirmation: confirmation
+
+  check_confirmation:
+    type: condition
+    config:
+      branches:
+        - condition:
+            operator: or
+            conditions:
+              - {field: state.confirmation, operator: eq, value: "si"}
+              - {field: state.confirmation, operator: eq, value: "sí"}
+              - {field: state.confirmation, operator: eq, value: "yes"}
+              - {field: state.confirmation, operator: eq, value: "s"}
+          target: executor
+      default: canceller
+
+  executor:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        El usuario confirmó la acción. Simula la ejecución y reporta el resultado
+        de forma clara: qué se hizo, cuándo y con qué resultado.
+        Sé específico y profesional.
+      output_schema: "examples.schemas.ResultOutput"
+      state_output_mapping:
+        result: result
+
+  canceller:
+    type: agent
+    config:
+      model: "openai:gpt-4o-mini"
+      system_prompt: |
+        El usuario canceló la acción. Confirma la cancelación de forma amable,
+        asegura que no se realizó ningún cambio y ofrece asistencia adicional.
+      output_schema: "examples.schemas.ResultOutput"
+      state_output_mapping:
+        result: result
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: analyzer
+    to_node: await_confirmation
+  - from_node: check_confirmation
+    to_node: executor
+  - from_node: check_confirmation
+    to_node: canceller
+  - from_node: executor
+    to_node: end
+  - from_node: canceller
+    to_node: end

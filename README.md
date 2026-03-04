@@ -168,22 +168,147 @@ agentflow/
 examples/
 ├── sales_router.yaml              # Router con edges condicionales
 ├── sales_router_condition.yaml    # Router con ConditionNode AND/OR
-└── schemas.py                     # Pydantic output schemas de los ejemplos
+├── 01_evaluator_loop.yaml         # Loop con score y feedback
+├── 02_sequential_pipeline.yaml    # Pipeline de 4 agentes en cadena
+├── 03_tool_plus_agent.yaml        # ToolNode + AgentNode personalizado
+├── 04_supervisor.yaml             # Supervisor que delega a especialistas
+├── 05_error_handling.yaml         # on_error routing y fallback
+├── 06_human_in_the_loop.yaml      # Suspend/resume con confirmación humana
+├── schemas.py                     # Pydantic output schemas de los ejemplos
+└── tools.py                       # Tools simuladas para el ejemplo 03
 
 run.py                             # Script de demo CLI
 ```
 
 ---
 
-## Patrones soportados
+## Ejemplos
 
-| Patrón | Implementación |
-|--------|---------------|
-| **Router** | AgentNode clasifica → edges con `EdgeCondition` según `state.intent` |
-| **Supervisor** | AgentNode cuyo output determina la rama del grafo |
-| **Evaluator Loop** | Edge de retorno condicional en score + `max_depth` como guardia |
-| **Tool-Orchestrated** | AgentNode con tools Pydantic AI; el agente decide qué tool llamar |
-| **Human-in-the-loop** | `human_input` node suspende → API resume con input externo |
+Todos los ejemplos se ejecutan con:
+
+```bash
+uv run python run.py --yaml examples/<archivo>.yaml "<mensaje>"
+```
+
+---
+
+### Router con ConditionNode AND/OR
+**`sales_router_condition.yaml`**
+
+Clasifica la intención del usuario y bifurca el flujo. Demuestra `ConditionNode` con condiciones compuestas AND/OR.
+
+```
+classifier → check_intent (condition) → closer   [HOT + confidence >= 0.8]
+                                      → educator [WARM]
+                                      → nurture  [default]
+```
+
+```bash
+uv run python run.py --yaml examples/sales_router_condition.yaml "quiero comprar ahora"
+```
+
+---
+
+### Evaluator Loop
+**`01_evaluator_loop.yaml`**
+
+Un agente genera contenido, otro lo evalúa con score numérico. Si el score es bajo vuelve al escritor con feedback. `max_depth` actúa como guardia contra loops infinitos.
+
+```
+writer → evaluator → check_quality → publisher → end  [score >= 0.8]
+            ↑                      → writer            [score < 0.8]
+            └──────────────────────────────────
+```
+
+```bash
+uv run python run.py --yaml examples/01_evaluator_loop.yaml "inteligencia artificial en medicina"
+```
+
+---
+
+### Pipeline Secuencial
+**`02_sequential_pipeline.yaml`**
+
+Cuatro agentes en cadena donde cada uno enriquece el estado: extrae entidades, analiza sentimiento e intención, define estrategia y redacta la respuesta final.
+
+```
+extractor → analyzer → strategist → responder → end
+```
+
+```bash
+uv run python run.py --yaml examples/02_sequential_pipeline.yaml "me cobraron dos veces el mes pasado"
+```
+
+---
+
+### Tool + Agent
+**`03_tool_plus_agent.yaml`**
+
+Un `ToolNode` carga datos del usuario desde un sistema externo (simulado) antes de invocar el LLM. El agente responde de forma personalizada con contexto real.
+
+```
+load_context (tool) → check_usage (condition) → alert_agent    [usage >= 90%]
+                                              → advisory_agent [usage >= 70%]
+                                              → support_agent  [default]
+```
+
+```bash
+uv run python run.py --yaml examples/03_tool_plus_agent.yaml "¿cómo puedo ver mi factura?"
+```
+
+---
+
+### Supervisor
+**`04_supervisor.yaml`**
+
+Un agente supervisor analiza la solicitud y decide a qué especialista derivar. El `ConditionNode` lee la decisión y rutea al especialista correspondiente.
+
+```
+supervisor → route_to_specialist (condition) → billing_agent
+                                             → technical_agent
+                                             → account_agent
+                                             → sales_agent
+                                             → general_agent  [default]
+```
+
+```bash
+uv run python run.py --yaml examples/04_supervisor.yaml "no puedo acceder a mi cuenta"
+```
+
+---
+
+### Error Handling
+**`05_error_handling.yaml`**
+
+Demuestra `on_error` routing (SPEC §5.2): si el nodo principal falla después de reintentos, el runtime lo redirige al `error_handler` en vez de terminar en `FAILED`.
+
+```
+risky_agent ──[on_error]──→ error_handler → error_end
+     ↓
+check_result → success_end
+```
+
+```bash
+uv run python run.py --yaml examples/05_error_handling.yaml "procesa esta solicitud"
+```
+
+---
+
+### Human-in-the-loop
+**`06_human_in_the_loop.yaml`**
+
+La ejecución se **suspende** en el nodo `human_input` esperando confirmación antes de ejecutar una acción de alto impacto. `run.py` muestra el resumen y el nivel de impacto, y espera la respuesta del usuario antes de resumir.
+
+```
+analyzer → await_confirmation (human_input) ← SUSPENDED
+                ↓ resume con "sí" / "no"
+           check_confirmation (condition) → executor  [confirmado]
+                                          → canceller [cancelado]
+```
+
+```bash
+uv run python run.py --yaml examples/06_human_in_the_loop.yaml "elimina todos los registros del mes pasado"
+```
 
 ---
 

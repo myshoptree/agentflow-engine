@@ -72,3 +72,12 @@ class SupervisorOutput(BaseModel):
 
 class ResultOutput(BaseModel):
     result: str
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop (06_human_in_the_loop.yaml)
+# ---------------------------------------------------------------------------
+
+class ActionAnalysisOutput(BaseModel):
+    action_summary: str
+    impact_level: Literal["alto", "medio", "bajo"]
