@@ -77,9 +77,9 @@ Este documento define las reglas y restricciones de negocio del sistema.
 ### 3.5 TRANSFORM
 
 - Un nodo `transform` aplica operaciones declarativas sobre el estado sin invocar LLMs ni sistemas externos.
-- Las operaciones permitidas son: `set` (copia directa), `template` (interpolación de strings con `str.format_map`), `extract` (subcampo de dict/list por dot-notation), `cast` (conversión de tipo).
+- Las operaciones permitidas son: `set` (copia directa), `template` (interpolación de strings), `extract` (subcampo de dict/list por dot-notation), `cast` (conversión de tipo).
 - El nodo es determinista: mismo estado de entrada produce siempre el mismo estado de salida.
-- Las operaciones `template` usan `str.format_map()` — nunca `eval()`.
+- Las operaciones `template` usan sustitución por regex sobre el patrón `{state.field}` — nunca `eval()`. La interpolación es exclusivamente para referencias al estado (`state.*`), no expresiones arbitrarias.
 
 ---
 
@@ -123,7 +123,7 @@ Este documento define las reglas y restricciones de negocio del sistema.
 - Un nodo puede declarar `timeout_seconds` en su config. Si la ejecución del nodo supera ese tiempo, se trata como un fallo no recuperable del nodo (equivalente a reintentos agotados).
 - El timeout por nodo no cancela el timeout global (§5.3) — ambos aplican de forma independiente.
 - Un timeout de nodo sin `on_error` definido termina la ejecución en `FAILED`.
-- Se emite el evento `node.timeout` con `node_id` y `timeout_seconds`.
+- El timeout de nodo se registra vía el evento `node.failed` con la razón `NodeTimeoutError`. No genera un evento de tipo `node.timeout` separado.
 
 ---
 
