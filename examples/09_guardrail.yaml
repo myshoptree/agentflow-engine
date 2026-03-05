@@ -1,0 +1,115 @@
+id: guardrail
+version: "1.0.0"
+name: GUARDRAIL — validación de seguridad antes de publicar respuesta
+entry_node: responder
+
+# Patrón: el agente genera una respuesta → el guardrail la evalúa antes
+# de que salga del grafo. Si detecta contenido problemático, redirige
+# a un nodo de manejo de error en lugar de publicar la respuesta.
+#
+# Checks implementados en este ejemplo:
+#   - toxicity: heurístico sobre el contenido de la respuesta
+#   - custom_llm: LLM-as-judge que evalúa si la respuesta es apropiada
+#
+# Flujo principal:
+#   responder → guardrail → end (si pasa)
+#              ↓
+#           safety_handler → end (si falla)
+#
+# El guardrail escribe `guard_result` y `guard_reason` al estado,
+# permitiendo auditar por qué fue bloqueada una respuesta.
+
+state_schema:
+  - name: user_query
+    type: str
+    required: true
+  - name: response
+    type: str
+    default: ""
+  - name: safe_response
+    type: str
+    default: ""
+  - name: guard_result
+    type: str
+    default: ""
+  - name: guard_reason
+    type: str
+    default: ""
+
+global_timeout_seconds: 90
+max_depth: 10
+
+nodes:
+  # El agente genera una respuesta normalmente.
+  # El guardrail valida el output ANTES de que llegue al usuario.
+  responder:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Responde la consulta del usuario de forma directa y útil.
+        Sé conciso — máximo 3 oraciones.
+      output_schema_inline:
+        response:
+          type: str
+      state_output_mapping:
+        response: response
+      timeout_seconds: 15.0
+
+  # GUARDRAIL: evalúa `state.response` antes de publicarlo.
+  # - toxicity: heurístico (no requiere dependencias externas)
+  # - custom_llm: LLM evalúa si el contenido es apropiado para publicar
+  #
+  # Si algún check falla → on_fail: safety_handler
+  # Si todos pasan → continúa por el edge normal → end
+  #
+  # output_mapping escribe el resultado en campos del estado para auditoría.
+  content_guard:
+    type: guardrail
+    on_error: safety_handler    # si el guardrail mismo falla (error técnico)
+    config:
+      checks:
+        - type: toxicity
+          field: state.response
+        - type: custom_llm
+          field: state.response
+          model: "anthropic:claude-haiku-4-5-20251001"
+          prompt: |
+            Evalúa si el siguiente texto es apropiado para publicar en
+            un producto de atención al cliente empresarial.
+            Responde "yes" si contiene información sensible, lenguaje
+            inapropiado, datos personales o contenido que no debería
+            publicarse. Responde "no" si es apropiado.
+      on_fail: safety_handler
+      output_mapping:
+        guard_result: result
+        guard_reason: reason
+
+  # Se ejecuta cuando el guardrail detecta un problema.
+  # Genera una respuesta de fallback segura sin revelar la respuesta bloqueada.
+  safety_handler:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        La respuesta generada no pasó la validación de seguridad.
+        Genera una respuesta alternativa, genérica y segura para el usuario,
+        indicando que su consulta está siendo revisada por el equipo.
+        No menciones que hubo un problema técnico o de seguridad.
+      output_schema_inline:
+        safe_response:
+          type: str
+      state_output_mapping:
+        safe_response: safe_response
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: responder
+    to_node: content_guard
+  - from_node: content_guard
+    to_node: end
+  - from_node: safety_handler
+    to_node: end

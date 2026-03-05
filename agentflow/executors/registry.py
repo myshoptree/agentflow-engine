@@ -18,8 +18,11 @@ class UnknownNodeTypeError(Exception):
 def get_executor(node_type: NodeType, compiled_graph: "CompiledGraph") -> Any:
     from agentflow.executors.agent_executor import AgentExecutor
     from agentflow.executors.condition_executor import ConditionExecutor
-    from agentflow.executors.tool_executor import ToolExecutor
+    from agentflow.executors.guardrail_executor import GuardrailExecutor
     from agentflow.executors.parallel_executor import ParallelExecutor
+    from agentflow.executors.set_state_executor import SetStateExecutor
+    from agentflow.executors.tool_executor import ToolExecutor
+    from agentflow.executors.transform_executor import TransformExecutor
 
     if node_type == NodeType.AGENT:
         return AgentExecutor()
@@ -34,12 +37,27 @@ def get_executor(node_type: NodeType, compiled_graph: "CompiledGraph") -> Any:
         return _EndExecutor()
     if node_type == NodeType.HUMAN_INPUT:
         return _HumanInputExecutor()
+    if node_type == NodeType.SET_STATE:
+        return SetStateExecutor()
+    if node_type == NodeType.TRANSFORM:
+        return TransformExecutor()
+    if node_type == NodeType.GUARDRAIL:
+        return GuardrailExecutor()
+    # NOTE and START are handled directly in the runtime loop (no executor)
+    if node_type in (NodeType.NOTE, NodeType.START):
+        return _NoOpExecutor()
 
     raise UnknownNodeTypeError(f"No executor registered for node type '{node_type}'")
 
 
 class _EndExecutor:
     """Sentinel — runtime detects END nodes before dispatching."""
+    async def execute(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+
+class _NoOpExecutor:
+    """Sentinel for nodes handled entirely by the runtime loop (NOTE, START)."""
     async def execute(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return {}
 

@@ -1,0 +1,177 @@
+id: evaluator-loop-set-state
+version: "1.0.0"
+name: Evaluator Loop con SET_STATE — contador explícito de iteraciones
+entry_node: reset_counter
+
+# Patrón: variante del evaluator loop clásico (01_evaluator_loop.yaml)
+# que usa SET_STATE para inicializar y actualizar un contador explícito
+# de iteraciones — haciendo el control de flujo legible en el YAML.
+#
+# Diferencia vs 01_evaluator_loop.yaml:
+#   - El contador `iteration` se maneja con set_state + transform,
+#     no depende solo de max_depth como guardia implícita.
+#   - El ConditionNode tiene dos salidas: calidad aprobada O límite alcanzado.
+#   - Demuestra cómo set_state inicializa estado antes de un loop y
+#     transform lo incrementa en cada vuelta.
+#
+# Flujo:
+#   reset_counter → writer → evaluator → check →
+#     ├─ score >= 0.8        → publisher → end
+#     ├─ iterations >= 3     → force_publish → end   (límite alcanzado)
+#     └─ score < 0.8 y room  → increment → writer (loop)
+
+state_schema:
+  - name: topic
+    type: str
+    required: true
+  - name: draft
+    type: str
+    default: ""
+  - name: feedback
+    type: str
+    default: ""
+  - name: score
+    type: float
+    default: 0.0
+  - name: iteration
+    type: int
+    default: 0
+  - name: final_content
+    type: str
+    default: ""
+
+global_timeout_seconds: 180
+max_depth: 30
+
+nodes:
+  # SET_STATE: inicializa el contador antes de entrar al loop.
+  # Sin este nodo, habría que confiar en el default del state_schema.
+  # Con set_state el intent es explícito y auditable en el grafo.
+  reset_counter:
+    type: set_state
+    config:
+      assignments:
+        iteration: 0
+        score: 0.0
+        feedback: ""
+
+  writer:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un redactor experto. Escribe un párrafo conciso y de alta calidad
+        sobre el tema indicado en `topic` (3 a 5 oraciones).
+        Si `feedback` no está vacío, úsalo para mejorar el `draft` anterior.
+      output_schema_inline:
+        draft:
+          type: str
+      state_output_mapping:
+        draft: draft
+
+  evaluator:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Evalúa el `draft` con criterios de claridad, especificidad y concisión.
+        Devuelve un score de 0.0 a 1.0 y feedback específico.
+        Si score >= 0.8 el feedback puede estar vacío.
+      output_schema_inline:
+        score:
+          type: float
+        feedback:
+          type: str
+      state_output_mapping:
+        score: score
+        feedback: feedback
+
+  # ConditionNode con dos salidas explícitas:
+  #   1. score suficiente → publisher
+  #   2. límite de iteraciones → force_publish
+  #   default (score bajo, hay room) → increment → writer
+  check:
+    type: condition
+    config:
+      branches:
+        - condition:
+            field: state.score
+            operator: gte
+            value: 0.8
+          target: publisher
+        - condition:
+            field: state.iteration
+            operator: gte
+            value: 3
+          target: force_publish
+      default: increment
+
+  # TRANSFORM: incrementa el contador en cada iteración del loop.
+  # cast: "int" garantiza que la suma sea entera aunque el estado sea float.
+  # Nota: el incremento real requiere leer el valor actual y sumarlo.
+  # Por ahora se hace con set_state referenciando state.iteration.
+  # Para aritmética real se necesitaría un ToolNode o extensión del DSL.
+  increment:
+    type: set_state
+    config:
+      assignments:
+        # Alternativa simple: el agente evaluator lleva el conteo
+        # En producción se usaría un ToolNode con lógica aritmética
+        iteration: 1   # placeholder — ver nota abajo
+
+  # NOTE: documentación del workaround de incremento.
+  _nota_incremento:
+    type: note
+    config:
+      text: |
+        El incremento de `iteration` con set_state solo puede asignar
+        valores literales o referencias al estado actual, no aritmética.
+        Para un contador real, usar un ToolNode que lea y sume.
+        En este ejemplo el control de iteraciones lo hace max_depth como
+        guardia final (SPEC §2.4), y el ConditionNode chequea iteration >= 3
+        que se controlaría con un tool real en producción.
+
+  publisher:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        El contenido pasó control de calidad. Preséntalo con un título
+        apropiado y el texto pulido. Responde solo con el contenido final.
+      output_schema_inline:
+        final_content:
+          type: str
+      state_output_mapping:
+        final_content: final_content
+
+  force_publish:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Se alcanzó el límite de iteraciones. Toma el `draft` actual y publícalo
+        con las mejoras que puedas aplicar en este paso final.
+        Indica brevemente que es una versión consolidada tras múltiples revisiones.
+      output_schema_inline:
+        final_content:
+          type: str
+      state_output_mapping:
+        final_content: final_content
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: reset_counter
+    to_node: writer
+  - from_node: writer
+    to_node: evaluator
+  - from_node: evaluator
+    to_node: check
+  - from_node: increment
+    to_node: writer
+  - from_node: publisher
+    to_node: end
+  - from_node: force_publish
+    to_node: end

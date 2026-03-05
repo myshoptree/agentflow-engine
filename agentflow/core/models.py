@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -19,6 +19,11 @@ class NodeType(str, Enum):
     PARALLEL = "parallel"
     HUMAN_INPUT = "human_input"
     END = "end"
+    NOTE = "note"
+    SET_STATE = "set_state"
+    TRANSFORM = "transform"
+    START = "start"
+    GUARDRAIL = "guardrail"
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +45,8 @@ class Edge(BaseModel):
     from_node: str
     to_node: str
     condition: EdgeCondition | None = None  # None = unconditional / fallback
+    condition_cel: str | None = None        # CEL expression string (SPEC §4.4)
+    condition_language: Literal["dsl", "cel"] = "dsl"
     priority: int = 0
 
 
@@ -86,11 +93,13 @@ class RetryPolicy(BaseModel):
 class AgentNodeConfig(BaseModel):
     model: str = "anthropic:claude-sonnet-4-6"
     system_prompt: str = ""
-    output_schema: str | None = None          # fully-qualified class name or None
-    state_output_mapping: dict[str, str] = {}  # {state_field: output_field}
-    max_retries: int = 3                       # legacy — use retry_policy instead
+    output_schema: str | None = None               # fully-qualified class name or None
+    output_schema_inline: dict[str, Any] | None = None  # inline schema definition (B4)
+    state_output_mapping: dict[str, str] = {}      # {state_field: output_field}
+    max_retries: int = 3                           # legacy — use retry_policy instead
     tools: list[str] = []
     retry_policy: RetryPolicy | None = None
+    timeout_seconds: float | None = None           # per-node timeout (SPEC §5.4)
 
 
 class ToolNodeConfig(BaseModel):
@@ -100,11 +109,13 @@ class ToolNodeConfig(BaseModel):
     max_retries: int = 3                  # legacy — use retry_policy instead
     on_error: str | None = None           # node_id to route on failure
     retry_policy: RetryPolicy | None = None
+    timeout_seconds: float | None = None  # per-node timeout (SPEC §5.4)
 
 
 class ParallelNodeConfig(BaseModel):
     branches: list[str]    # list of node_ids to execute in parallel
     output_mapping: dict[str, str] = {}
+    timeout_seconds: float | None = None  # per-node timeout (SPEC §5.4)
 
 
 class HumanInputNodeConfig(BaseModel):
@@ -137,6 +148,75 @@ class EndNodeConfig(BaseModel):
     pass
 
 
+# ---------------------------------------------------------------------------
+# NOTE node config (A1) — runtime ignores, compile-time transparent
+# ---------------------------------------------------------------------------
+
+class NoteNodeConfig(BaseModel):
+    text: str = ""
+
+
+# ---------------------------------------------------------------------------
+# SET_STATE node config (A3) — writes values directly to graph_state
+# ---------------------------------------------------------------------------
+
+class SetStateNodeConfig(BaseModel):
+    assignments: dict[str, Any] = {}  # {state_field: literal_value or "state.ref"}
+
+
+# ---------------------------------------------------------------------------
+# TRANSFORM node config (B1) — reshapes data without LLM
+# ---------------------------------------------------------------------------
+
+class TransformOperation(BaseModel):
+    set: str                                              # destination state field
+    from_field: str | None = None                         # "state.some_field"
+    template: str | None = None                           # "{state.first} {state.last}"
+    extract: str | None = None                            # dot-path within the value
+    cast: Literal["str", "int", "float", "bool"] | None = None
+
+
+class TransformNodeConfig(BaseModel):
+    operations: list[TransformOperation] = []
+
+
+# ---------------------------------------------------------------------------
+# START node config (B2) — explicit entry contract
+# ---------------------------------------------------------------------------
+
+class StartInputField(BaseModel):
+    name: str
+    type: StateFieldType = StateFieldType.STR
+    as_text: bool = False  # expose as input_as_text
+
+
+class StartNodeConfig(BaseModel):
+    inputs: list[StartInputField] = []
+
+
+# ---------------------------------------------------------------------------
+# GUARDRAIL node config (C1) — safety checks with pass/fail routing
+# ---------------------------------------------------------------------------
+
+class GuardrailCheckType(str, Enum):
+    PII = "pii"
+    TOXICITY = "toxicity"
+    CUSTOM_LLM = "custom_llm"
+
+
+class GuardrailCheck(BaseModel):
+    type: GuardrailCheckType
+    field: str                   # state field to evaluate
+    prompt: str | None = None    # only for custom_llm
+    model: str | None = None     # model for custom_llm (defaults to claude-sonnet-4-6)
+
+
+class GuardrailNodeConfig(BaseModel):
+    checks: list[GuardrailCheck]
+    on_fail: str                          # node_id to route to on failure
+    output_mapping: dict[str, str] = {}   # {state_field: "result" | "reason"}
+
+
 NodeConfig = (
     AgentNodeConfig
     | ToolNodeConfig
@@ -144,6 +224,11 @@ NodeConfig = (
     | HumanInputNodeConfig
     | ConditionNodeConfig
     | EndNodeConfig
+    | NoteNodeConfig
+    | SetStateNodeConfig
+    | TransformNodeConfig
+    | StartNodeConfig
+    | GuardrailNodeConfig
 )
 
 
@@ -164,6 +249,11 @@ class NodeDefinition(BaseModel):
             NodeType.HUMAN_INPUT: HumanInputNodeConfig,
             NodeType.CONDITION: ConditionNodeConfig,
             NodeType.END: EndNodeConfig,
+            NodeType.NOTE: NoteNodeConfig,
+            NodeType.SET_STATE: SetStateNodeConfig,
+            NodeType.TRANSFORM: TransformNodeConfig,
+            NodeType.START: StartNodeConfig,
+            NodeType.GUARDRAIL: GuardrailNodeConfig,
         }
         cls = mapping[self.type]
         return cls(**self.config)
@@ -267,6 +357,48 @@ class NodeExecutionRecord(BaseModel):
     llm_tokens_used: int = 0
     started_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# ExecutionTrace (B3) — first-class trace object (SPEC §7.4)
+# ---------------------------------------------------------------------------
+
+class ExecutionTrace(BaseModel):
+    execution_id: str
+    graph_id: str
+    graph_version: str
+    status: ExecutionStatus
+    duration_ms: float
+    total_tokens: int
+    node_records: list[NodeExecutionRecord] = []
+    checkpoints: list[StateCheckpoint] = []
+    final_state: dict[str, Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# Graders (C2) — evaluation of ExecutionTrace (SPEC §12)
+# ---------------------------------------------------------------------------
+
+class GraderType(str, Enum):
+    DETERMINISTIC = "deterministic"   # compare output vs expected using DSL
+    LLM_JUDGE = "llm_judge"           # LLM evaluates the trace
+    HEURISTIC = "heuristic"           # rules over trace metrics
+
+
+class Grader(BaseModel):
+    id: str
+    name: str
+    type: GraderType
+    config: dict[str, Any] = {}
+
+
+class GradeResult(BaseModel):
+    grader_id: str
+    execution_id: str
+    score: float                      # 0.0 = fail, 1.0 = pass
+    label: str | None = None          # optional human-readable label
+    reason: str | None = None
+    graded_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ---------------------------------------------------------------------------

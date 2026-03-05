@@ -25,14 +25,17 @@ from agentflow.core.models import (
     ConditionNodeConfig,
     ExecutionState,
     ExecutionStatus,
+    GuardrailNodeConfig,
     NodeExecutionRecord,
     NodeType,
     RetryPolicy,
+    StartNodeConfig,
 )
 from agentflow.core.observability import StructuredLogger
 from agentflow.core.state_manager import StateManagerProtocol
 from agentflow.dsl.condition_parser import (
     ConditionEvaluationError,
+    evaluate_cel_condition,
     evaluate_compound_condition,
     evaluate_condition,
 )
@@ -41,6 +44,10 @@ from agentflow.executors.registry import get_executor
 
 class RuntimeError_(Exception):
     """Internal runtime error (renamed to avoid shadowing built-in)."""
+
+
+class NodeTimeoutError(Exception):
+    """Raised when a node exceeds its per-node timeout (SPEC §5.4)."""
 
 
 def _get_retry_policy(node_def: Any) -> RetryPolicy:
@@ -127,6 +134,48 @@ class ExecutionRuntime:
 
                 node_def = compiled_node.definition
 
+                # --- NOTE node (A1) — invisible to runtime, skip silently ---
+                if node_def.type == NodeType.NOTE:
+                    next_node = self._resolve_transition(
+                        node_id, compiled_node.outgoing_edges, execution_state, log
+                    )
+                    if next_node is None:
+                        # NOTE with no outgoing edge — treat as end
+                        execution_state.status = ExecutionStatus.COMPLETED
+                        await self._sm.update_status(
+                            execution_state.execution_id, ExecutionStatus.COMPLETED
+                        )
+                        return execution_state
+                    execution_state.current_node = next_node
+                    execution_state.depth += 1
+                    await self._sm.save_execution(execution_state)
+                    continue
+
+                # --- START node (B2) — declarative entry point, inject input_as_text ---
+                if node_def.type == NodeType.START:
+                    start_cfg = StartNodeConfig(**node_def.config)
+                    for inp in start_cfg.inputs:
+                        if inp.as_text:
+                            raw = execution_state.graph_state.get(inp.name, "")
+                            execution_state.graph_state["input_as_text"] = str(raw)
+                    next_node = self._resolve_transition(
+                        node_id, compiled_node.outgoing_edges, execution_state, log
+                    )
+                    if next_node is None:
+                        reason = f"START node '{node_id}' has no outgoing edge"
+                        execution_state.status = ExecutionStatus.FAILED
+                        execution_state.error_message = reason
+                        await self._sm.update_status(
+                            execution_state.execution_id,
+                            ExecutionStatus.FAILED,
+                            error_message=reason,
+                        )
+                        return execution_state
+                    execution_state.current_node = next_node
+                    execution_state.depth += 1
+                    await self._sm.save_execution(execution_state)
+                    continue
+
                 # --- END node (SPEC §2.5) ---
                 if node_def.type == NodeType.END:
                     checkpoint = await self._sm.checkpoint(execution_state, node_id)
@@ -163,6 +212,7 @@ class ExecutionRuntime:
                 # --- Execute node with retry (SPEC §5.1) ---
                 executor = get_executor(node_def.type, compiled_graph)
                 retry_policy = _get_retry_policy(node_def)
+                node_timeout = node_def.config.get("timeout_seconds") if node_def.config else None
                 state_updates: dict[str, Any] | None = None
                 last_error: Exception | None = None
 
@@ -183,9 +233,17 @@ class ExecutionRuntime:
                         started_at=datetime.now(timezone.utc),
                     )
                     try:
-                        state_updates = await executor.execute(
-                            node_id, node_def, execution_state
-                        )
+                        coro = executor.execute(node_id, node_def, execution_state)
+                        if node_timeout is not None:
+                            try:
+                                state_updates = await asyncio.wait_for(coro, timeout=node_timeout)
+                            except asyncio.TimeoutError:
+                                raise NodeTimeoutError(
+                                    f"Node '{node_id}' timed out after {node_timeout}s (SPEC §5.4)"
+                                )
+                        else:
+                            state_updates = await coro
+
                         duration_ms = (time.monotonic() - t0) * 1000
                         record.output_data = state_updates
                         record.duration_ms = duration_ms
@@ -201,6 +259,17 @@ class ExecutionRuntime:
                         )
                         last_error = None
                         break
+
+                    except NodeTimeoutError as exc:
+                        # Timeout is non-retryable (SPEC §5.4)
+                        duration_ms = (time.monotonic() - t0) * 1000
+                        last_error = exc
+                        record.error_message = str(exc)
+                        record.duration_ms = duration_ms
+                        record.completed_at = datetime.now(timezone.utc)
+                        await self._sm.record_node_execution(record)
+                        log.node_failed(node_id, node_def.type.value, str(exc), attempt)
+                        break  # no retry on timeout
 
                     except Exception as exc:
                         duration_ms = (time.monotonic() - t0) * 1000
@@ -254,8 +323,24 @@ class ExecutionRuntime:
                 )
 
                 # --- Transition resolution (SPEC §2.5) ---
+                # GUARDRAIL: check result and route to on_fail if needed (SPEC §11.3)
+                if node_def.type == NodeType.GUARDRAIL and state_updates:
+                    guardrail_cfg = GuardrailNodeConfig(**node_def.config)
+                    guardrail_result = state_updates.get("result", "pass")
+                    if guardrail_result == "fail":
+                        next_node = guardrail_cfg.on_fail
+                        log.transition_resolved(
+                            from_node=node_id,
+                            to_node=next_node,
+                            condition_matched=True,
+                            condition_field="guardrail.result",
+                        )
+                    else:
+                        next_node = self._resolve_transition(
+                            node_id, compiled_node.outgoing_edges, execution_state, log
+                        )
                 # ConditionNode with explicit branches takes priority over edge-based routing
-                if (
+                elif (
                     node_def.type == NodeType.CONDITION
                     and node_def.config.get("branches")
                 ):
@@ -350,6 +435,22 @@ class ExecutionRuntime:
         fallback: str | None = None
 
         for edge in edges:
+            # CEL condition (SPEC §4.4)
+            if edge.condition_language == "cel" and edge.condition_cel is not None:
+                try:
+                    matched = evaluate_cel_condition(edge.condition_cel, execution_state.graph_state)
+                except Exception:
+                    matched = False
+                    log.warn_cel_evaluation_error(edge.from_node, edge.condition_cel)
+                if matched:
+                    log.transition_resolved(
+                        from_node=from_node,
+                        to_node=edge.to_node,
+                        condition_matched=True,
+                    )
+                    return edge.to_node
+                continue
+
             if edge.condition is None:
                 # Unconditional — keep as fallback, don't take immediately
                 if fallback is None:

@@ -1,0 +1,114 @@
+id: node-timeout
+version: "1.0.0"
+name: Timeout por nodo — protección contra herramientas lentas
+entry_node: fetch_external
+
+# Patrón: un grafo que depende de una herramienta externa (API, DB, webhook)
+# puede colgarse si esa herramienta no responde. `timeout_seconds` por nodo
+# interrumpe la corrutina del executor (asyncio.wait_for) y activa on_error.
+#
+# A diferencia de global_timeout_seconds (que verifica entre nodos),
+# timeout_seconds sí interrumpe mid-ejecución del nodo (SPEC §5.4).
+#
+# Flujo feliz:   fetch_external → enrich → responder → end
+# Flujo timeout: fetch_external (timeout) → fallback_fetch → responder → end
+# Flujo error:   fetch_external (error)   → fallback_fetch → responder → end
+#
+# El nodo responder siempre recibe datos — de la fuente principal o del fallback.
+
+state_schema:
+  - name: product_id
+    type: str
+    required: true
+  - name: product_name
+    type: str
+    default: ""
+  - name: product_price
+    type: float
+    default: 0.0
+  - name: product_stock
+    type: int
+    default: 0
+  - name: data_source
+    type: str
+    default: ""
+  - name: display_name
+    type: str
+    default: ""
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 30
+max_depth: 10
+
+nodes:
+  # Tool principal: consulta la API de inventario externa.
+  # timeout_seconds: 3.0 — si la API no responde en 3s, activa on_error.
+  # Esto NO es reintentable — el timeout es un fallo definitivo del nodo (SPEC §5.4).
+  fetch_external:
+    type: tool
+    on_error: fallback_fetch
+    config:
+      tool_name: "fetch_product_from_api"
+      timeout_seconds: 3.0
+      input_mapping:
+        product_id: product_id
+      output_mapping:
+        product_name: name
+        product_price: price
+        product_stock: stock
+        data_source: source
+
+  # SET_STATE: marca que los datos vienen del caché local (fallback).
+  # Permite que el agente adapte su respuesta según la fuente de datos.
+  fallback_fetch:
+    type: tool
+    config:
+      tool_name: "fetch_product_from_cache"
+      input_mapping:
+        product_id: product_id
+      output_mapping:
+        product_name: name
+        product_price: price
+        product_stock: stock
+        data_source: source
+
+  # TRANSFORM: construye el nombre de display para el agente.
+  # Si hay stock, muestra disponibilidad. Si no, lo indica claramente.
+  enrich:
+    type: transform
+    config:
+      operations:
+        - set: display_name
+          template: "{state.product_name} (${state.product_price})"
+
+  responder:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un asistente de tienda. Presenta la información del producto al cliente.
+        Si `data_source` es "cache", menciona que los datos pueden no estar
+        actualizados al momento y que verifique disponibilidad final.
+        Si `product_stock` es 0, indica que el producto no está disponible.
+      output_schema_inline:
+        response:
+          type: str
+      state_output_mapping:
+        response: response
+      timeout_seconds: 10.0
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: fetch_external
+    to_node: enrich
+  - from_node: fallback_fetch
+    to_node: enrich
+  - from_node: enrich
+    to_node: responder
+  - from_node: responder
+    to_node: end

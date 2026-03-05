@@ -23,8 +23,12 @@ from agentflow.core.models import (
     ConditionNodeConfig,
     EdgeCondition,
     GraphDefinition,
+    GuardrailNodeConfig,
     NodeType,
+    SetStateNodeConfig,
+    StartNodeConfig,
     StateFieldType,
+    TransformNodeConfig,
 )
 
 
@@ -71,7 +75,9 @@ class GraphCompiler:
         self._check_edge_references(definition, errors)
         self._check_reachability(definition, warnings)
         self._check_cycles(definition, errors)
-        self._check_conditions(definition, errors)
+        self._check_conditions(definition, errors, warnings)
+        self._check_new_node_types(definition, errors)
+        self._check_agent_inline_schema(definition, errors)
 
         if errors:
             raise GraphCompilationError(errors)
@@ -108,11 +114,37 @@ class GraphCompiler:
     def _check_reachability(
         self, definition: GraphDefinition, warnings: list[CompilationError]
     ) -> None:
-        """BFS from entry_node — unreachable nodes produce a warning (SPEC §2.3)."""
+        """BFS from entry_node — unreachable nodes produce a warning (SPEC §2.3).
+        NOTE nodes are excluded from reachability checks (A1 — they are transparent).
+
+        Implicit edges included in the BFS:
+        - on_error targets on any NodeDefinition
+        - ConditionNode branch targets and default
+        - GuardrailNode on_fail target
+        """
         adjacency: dict[str, list[str]] = {n: [] for n in definition.nodes}
         for edge in definition.edges:
             if edge.from_node in adjacency:
                 adjacency[edge.from_node].append(edge.to_node)
+
+        # Add implicit reachability from on_error, ConditionNode branches, GuardrailNode on_fail
+        for node_id, node_def in definition.nodes.items():
+            if node_def.on_error and node_def.on_error in definition.nodes:
+                adjacency[node_id].append(node_def.on_error)
+            if node_def.type == NodeType.CONDITION and node_def.config.get("branches"):
+                try:
+                    cfg = ConditionNodeConfig(**node_def.config)
+                    for branch in cfg.branches:
+                        if branch.target in definition.nodes:
+                            adjacency[node_id].append(branch.target)
+                    if cfg.default and cfg.default in definition.nodes:
+                        adjacency[node_id].append(cfg.default)
+                except Exception:
+                    pass
+            if node_def.type == NodeType.GUARDRAIL and node_def.config.get("on_fail"):
+                on_fail = node_def.config["on_fail"]
+                if on_fail in definition.nodes:
+                    adjacency[node_id].append(on_fail)
 
         visited: set[str] = set()
         queue: deque[str] = deque([definition.entry_node])
@@ -125,7 +157,10 @@ class GraphCompiler:
                 if neighbor not in visited:
                     queue.append(neighbor)
 
-        for node_id in definition.nodes:
+        for node_id, node_def in definition.nodes.items():
+            # NOTE nodes are documentation-only — skip reachability check (SPEC A1)
+            if node_def.type == NodeType.NOTE:
+                continue
             if node_id not in visited:
                 warnings.append(CompilationError(
                     severity="warning",
@@ -234,12 +269,35 @@ class GraphCompiler:
                 ))
 
     def _check_conditions(
-        self, definition: GraphDefinition, errors: list[CompilationError]
+        self,
+        definition: GraphDefinition,
+        errors: list[CompilationError],
+        warnings: list[CompilationError] | None = None,
     ) -> None:
-        """Validate condition fields and value types against state_schema (SPEC §4.2, §4.3)."""
+        """Validate condition fields and value types against state_schema (SPEC §4.2, §4.3, §4.4)."""
         schema_map = {f.name: f for f in definition.state_schema}
+        _warnings = warnings if warnings is not None else []
 
         for edge in definition.edges:
+            # Detect ambiguity: both DSL and CEL defined (SPEC §4.4)
+            if edge.condition is not None and edge.condition_cel is not None:
+                errors.append(CompilationError(
+                    severity="error",
+                    message=(
+                        f"Edge from '{edge.from_node}' to '{edge.to_node}' defines both "
+                        "'condition' (DSL) and 'condition_cel' (CEL) — use only one."
+                    ),
+                    node_id=edge.from_node,
+                ))
+                continue
+
+            # Validate CEL expression syntax at compile time (SPEC §4.4)
+            if edge.condition_language == "cel" and edge.condition_cel is not None:
+                self._validate_cel_syntax(
+                    edge.condition_cel, edge.from_node, errors, _warnings
+                )
+                continue
+
             if edge.condition is None:
                 continue
             self._validate_condition(edge.condition, schema_map, errors)
@@ -336,6 +394,241 @@ class GraphCompiler:
                     f"with field '{field_name}' of type '{schema_field.type}'"
                 ),
             ))
+
+    def _validate_cel_syntax(
+        self,
+        expr: str,
+        from_node: str,
+        errors: list[CompilationError],
+        warnings: list[CompilationError] | None = None,
+    ) -> None:
+        """Parse CEL expression at compile time to catch syntax errors (SPEC §4.4)."""
+        if warnings is None:
+            warnings = errors  # fallback: use errors list for compat (still just a warning)
+        try:
+            import cel  # type: ignore[import]
+            cel.Environment().compile(expr)
+        except ImportError:
+            # cel-python not installed — warn but don't block compilation (SPEC §4.4)
+            warnings.append(CompilationError(
+                severity="warning",
+                message=(
+                    "CEL condition used but 'google-cel-python' is not installed. "
+                    "Install it with: uv add google-cel-python"
+                ),
+                node_id=from_node,
+            ))
+        except Exception as exc:
+            errors.append(CompilationError(
+                severity="error",
+                message=f"CEL syntax error in edge from '{from_node}': {exc}",
+                node_id=from_node,
+            ))
+
+    def _check_new_node_types(
+        self, definition: GraphDefinition, errors: list[CompilationError]
+    ) -> None:
+        """Validate configs for SET_STATE, TRANSFORM, START, GUARDRAIL nodes."""
+        schema_map = {f.name: f for f in definition.state_schema}
+
+        for node_id, node_def in definition.nodes.items():
+            if node_def.type == NodeType.SET_STATE:
+                self._validate_set_state(node_id, node_def.config, schema_map, errors)
+            elif node_def.type == NodeType.TRANSFORM:
+                self._validate_transform(node_id, node_def.config, schema_map, errors)
+            elif node_def.type == NodeType.START:
+                self._validate_start(node_id, node_def.config, definition, errors)
+            elif node_def.type == NodeType.GUARDRAIL:
+                self._validate_guardrail(node_id, node_def.config, definition, schema_map, errors)
+
+    def _validate_set_state(
+        self,
+        node_id: str,
+        config: dict,
+        schema_map: dict,
+        errors: list[CompilationError],
+    ) -> None:
+        try:
+            cfg = SetStateNodeConfig(**config)
+        except Exception as exc:
+            errors.append(CompilationError(
+                severity="error",
+                message=f"SET_STATE node '{node_id}' has invalid config: {exc}",
+                node_id=node_id,
+            ))
+            return
+
+        if not schema_map:
+            return  # no schema to validate against
+
+        for field_name, value in cfg.assignments.items():
+            if field_name not in schema_map:
+                errors.append(CompilationError(
+                    severity="error",
+                    message=(
+                        f"SET_STATE node '{node_id}' assigns to field '{field_name}' "
+                        "which is not declared in state_schema"
+                    ),
+                    node_id=node_id,
+                ))
+            # Validate state.ref references
+            if isinstance(value, str) and value.startswith("state."):
+                ref_field = value[len("state."):]
+                if ref_field not in schema_map:
+                    errors.append(CompilationError(
+                        severity="error",
+                        message=(
+                            f"SET_STATE node '{node_id}' references '{value}' "
+                            f"which is not declared in state_schema"
+                        ),
+                        node_id=node_id,
+                    ))
+
+    def _validate_transform(
+        self,
+        node_id: str,
+        config: dict,
+        schema_map: dict,
+        errors: list[CompilationError],
+    ) -> None:
+        try:
+            cfg = TransformNodeConfig(**config)
+        except Exception as exc:
+            errors.append(CompilationError(
+                severity="error",
+                message=f"TRANSFORM node '{node_id}' has invalid config: {exc}",
+                node_id=node_id,
+            ))
+            return
+
+        if not schema_map:
+            return
+
+        for op in cfg.operations:
+            if op.set not in schema_map:
+                errors.append(CompilationError(
+                    severity="error",
+                    message=(
+                        f"TRANSFORM node '{node_id}' writes to field '{op.set}' "
+                        "which is not declared in state_schema"
+                    ),
+                    node_id=node_id,
+                ))
+            if op.from_field is not None and op.from_field.startswith("state."):
+                ref = op.from_field[len("state."):]
+                if ref not in schema_map:
+                    errors.append(CompilationError(
+                        severity="error",
+                        message=(
+                            f"TRANSFORM node '{node_id}' references '{op.from_field}' "
+                            "which is not declared in state_schema"
+                        ),
+                        node_id=node_id,
+                    ))
+
+    def _validate_start(
+        self,
+        node_id: str,
+        config: dict,
+        definition: GraphDefinition,
+        errors: list[CompilationError],
+    ) -> None:
+        try:
+            cfg = StartNodeConfig(**config)
+        except Exception as exc:
+            errors.append(CompilationError(
+                severity="error",
+                message=f"START node '{node_id}' has invalid config: {exc}",
+                node_id=node_id,
+            ))
+            return
+
+        schema_map = {f.name: f for f in definition.state_schema}
+        if not schema_map:
+            return
+
+        has_as_text = False
+        for inp in cfg.inputs:
+            if inp.name not in schema_map:
+                errors.append(CompilationError(
+                    severity="error",
+                    message=(
+                        f"START node '{node_id}' declares input '{inp.name}' "
+                        "which is not declared in state_schema"
+                    ),
+                    node_id=node_id,
+                ))
+            if inp.as_text:
+                has_as_text = True
+
+        if has_as_text and "input_as_text" not in schema_map:
+            errors.append(CompilationError(
+                severity="error",
+                message=(
+                    f"START node '{node_id}' has as_text=true but 'input_as_text' "
+                    "is not declared in state_schema"
+                ),
+                node_id=node_id,
+            ))
+
+    def _validate_guardrail(
+        self,
+        node_id: str,
+        config: dict,
+        definition: GraphDefinition,
+        schema_map: dict,
+        errors: list[CompilationError],
+    ) -> None:
+        try:
+            cfg = GuardrailNodeConfig(**config)
+        except Exception as exc:
+            errors.append(CompilationError(
+                severity="error",
+                message=f"GUARDRAIL node '{node_id}' has invalid config: {exc}",
+                node_id=node_id,
+            ))
+            return
+
+        if cfg.on_fail not in definition.nodes:
+            errors.append(CompilationError(
+                severity="error",
+                message=(
+                    f"GUARDRAIL node '{node_id}' on_fail '{cfg.on_fail}' "
+                    "does not exist in nodes"
+                ),
+                node_id=node_id,
+            ))
+
+        if schema_map:
+            for check in cfg.checks:
+                field_name = check.field[len("state."):] if check.field.startswith("state.") else check.field
+                if field_name not in schema_map:
+                    errors.append(CompilationError(
+                        severity="error",
+                        message=(
+                            f"GUARDRAIL node '{node_id}' check references field '{check.field}' "
+                            "which is not declared in state_schema"
+                        ),
+                        node_id=node_id,
+                    ))
+
+    def _check_agent_inline_schema(
+        self, definition: GraphDefinition, errors: list[CompilationError]
+    ) -> None:
+        """Validate that agent nodes don't use both output_schema and output_schema_inline (B4)."""
+        for node_id, node_def in definition.nodes.items():
+            if node_def.type != NodeType.AGENT:
+                continue
+            cfg = node_def.config
+            if cfg.get("output_schema") and cfg.get("output_schema_inline"):
+                errors.append(CompilationError(
+                    severity="error",
+                    message=(
+                        f"Agent node '{node_id}' defines both 'output_schema' and "
+                        "'output_schema_inline' — use only one."
+                    ),
+                    node_id=node_id,
+                ))
 
     # ------------------------------------------------------------------
     # Build compiled nodes

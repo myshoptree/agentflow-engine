@@ -212,6 +212,16 @@ class StructuredLogger:
             from_node=from_node,
         ))
 
+    def warn_cel_evaluation_error(self, from_node: str, expr: str) -> None:
+        """CEL evaluation failure — treated as false, logged as warning (SPEC §4.4)."""
+        _emit(_base(
+            "warning.cel_evaluation_error",
+            self.execution_id,
+            self.graph_id,
+            from_node=from_node,
+            cel_expression=expr,
+        ))
+
     # -- State checkpoint events --
 
     def state_checkpoint(

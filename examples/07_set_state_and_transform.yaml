@@ -1,0 +1,103 @@
+id: set-state-and-transform
+version: "1.0.0"
+name: SET_STATE + TRANSFORM — preparación de contexto sin LLM
+entry_node: init
+
+# Patrón: antes de invocar un LLM, preparar el estado con nodos declarativos
+# puros (sin LLM, sin herramientas externas):
+#   1. set_state  → inicializa contadores y flags de control
+#   2. transform  → construye campos derivados (nombre completo, mensaje formateado)
+#   3. agent      → recibe el estado ya enriquecido y responde directamente
+#
+# Beneficio: el agente no necesita hacer inferencias sobre datos que ya están
+# disponibles en el estado — solo se concentra en razonar y responder.
+
+state_schema:
+  - name: first_name
+    type: str
+    required: true
+  - name: last_name
+    type: str
+    required: true
+  - name: plan
+    type: str
+    required: true
+  - name: usage_percent
+    type: float
+    required: true
+  - name: full_name
+    type: str
+    default: ""
+  - name: context_summary
+    type: str
+    default: ""
+  - name: attempt
+    type: int
+    default: 0
+  - name: status
+    type: str
+    default: ""
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 60
+max_depth: 10
+
+nodes:
+  # SET_STATE: inicializa variables de control antes de comenzar el flujo.
+  # No invoca LLM ni herramientas — escritura declarativa pura (SPEC §3.4).
+  init:
+    type: set_state
+    config:
+      assignments:
+        attempt: 0
+        status: "processing"
+
+  # TRANSFORM: construye campos derivados a partir del estado existente.
+  # Operaciones usadas: template (interpolación) y cast (conversión de tipo).
+  # Nunca usa eval() — usa regex interna segura (SPEC §3.5).
+  build_context:
+    type: transform
+    config:
+      operations:
+        # Concatena first_name + last_name en un solo campo
+        - set: full_name
+          template: "{state.first_name} {state.last_name}"
+
+        # Construye un resumen de contexto legible para el agente
+        - set: context_summary
+          template: "Cliente: {state.first_name} {state.last_name} | Plan: {state.plan} | Uso: {state.usage_percent}%"
+
+  # AGENT: recibe el contexto ya construido — no necesita inferirlo.
+  # Usa output_schema_inline: define el schema directamente en YAML,
+  # sin requerir un módulo Python externo (B4).
+  advisor:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un asesor de cuenta. Tienes el contexto completo del cliente en el estado.
+        Usa `full_name` para dirigirte al cliente por nombre.
+        Usa `context_summary` para personalizar tu respuesta.
+        Recomienda una acción concreta basada en el porcentaje de uso del plan.
+      output_schema_inline:
+        response:
+          type: str
+        recommendation:
+          type: str
+          enum: ["upgrade", "maintain", "downgrade"]
+      state_output_mapping:
+        response: response
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: init
+    to_node: build_context
+  - from_node: build_context
+    to_node: advisor
+  - from_node: advisor
+    to_node: end

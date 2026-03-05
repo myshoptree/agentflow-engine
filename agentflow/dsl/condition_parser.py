@@ -123,3 +123,32 @@ def _assert_comparable(actual: Any, expected: Any, op: str) -> None:
             f"Operator '{op}' requires numeric values, "
             f"got {type(actual).__name__} and {type(expected).__name__}"
         )
+
+
+def evaluate_cel_condition(expr: str, graph_state: dict[str, Any]) -> bool:
+    """
+    Evaluate a CEL expression against graph_state (SPEC §4.4).
+
+    The expression has access to a 'state' variable that maps to graph_state.
+    On evaluation error: raises ConditionEvaluationError (caller logs warning
+    and treats as False per SPEC §4.4).
+
+    Requires: uv add google-cel-python
+    """
+    try:
+        import cel  # type: ignore[import]
+    except ImportError as exc:
+        raise ConditionEvaluationError(
+            "CEL evaluation requires 'google-cel-python'. "
+            "Install it with: uv add google-cel-python"
+        ) from exc
+
+    try:
+        env = cel.Environment()
+        prog = env.compile(expr)
+        result = prog.evaluate({"state": graph_state})
+        return bool(result)
+    except Exception as exc:
+        raise ConditionEvaluationError(
+            f"CEL evaluation failed for expression {expr!r}: {exc}"
+        ) from exc

@@ -39,10 +39,18 @@ Este documento define las reglas y restricciones de negocio del sistema.
 - El campo `max_depth` actúa como guardia de último recurso contra loops no terminantes. Cuando se alcanza, la ejecución termina en `FAILED`.
 
 ### 2.5 Prioridad de transiciones
+
 - Cuando múltiples edges salen del mismo nodo, se evalúan en orden de `priority` descendente.
 - El primer edge cuya condición sea verdadera determina el siguiente nodo.
 - Un edge sin condición (`condition: null`) actúa como fallback y solo se toma si ningún edge condicional anterior fue verdadero.
 - Si ningún edge aplica y no hay fallback, la ejecución termina en `FAILED` con razón `no_valid_transition`.
+
+### 2.6 Contrato de entrada (StartNode)
+
+- Si el `entry_node` es de tipo `start`, debe declarar explícitamente los campos de input que acepta en `config.inputs`.
+- El compilador valida que cada campo declarado en `inputs` existe en el `state_schema`.
+- Si se declara `as_text: true` en un campo de tipo `str`, ese campo también se expone como `input_as_text` en el estado antes de continuar al siguiente nodo.
+- El nodo `start` no tiene executor propio — es un punto de entrada declarativo que el runtime avanza automáticamente.
 
 ---
 
@@ -57,7 +65,21 @@ Este documento define las reglas y restricciones de negocio del sistema.
 - El historial de checkpoints es la fuente de verdad para auditoría y recuperación.
 
 ### 3.3 Estado inicial
+
 - El estado inicial de una ejecución se construye a partir de los valores `default` del `state_schema` del grafo, sobrescritos por el `initial_input` provisto al iniciar la ejecución.
+
+### 3.4 SET_STATE
+
+- Un nodo `set_state` escribe directamente al `graph_state` los campos declarados en `assignments`.
+- Los valores pueden ser literales o referencias a campos del estado actual usando notación `state.field`.
+- Solo puede escribir campos declarados en el `state_schema` del grafo. El compilador rechaza campos no declarados.
+
+### 3.5 TRANSFORM
+
+- Un nodo `transform` aplica operaciones declarativas sobre el estado sin invocar LLMs ni sistemas externos.
+- Las operaciones permitidas son: `set` (copia directa), `template` (interpolación de strings con `str.format_map`), `extract` (subcampo de dict/list por dot-notation), `cast` (conversión de tipo).
+- El nodo es determinista: mismo estado de entrada produce siempre el mismo estado de salida.
+- Las operaciones `template` usan `str.format_map()` — nunca `eval()`.
 
 ---
 
@@ -72,6 +94,13 @@ Este documento define las reglas y restricciones de negocio del sistema.
 
 ### 4.3 Compatibilidad de tipos
 - El tipo del valor en la condición debe ser compatible con el tipo declarado del campo en `state_schema`. Una incompatibilidad es un **error de compilación**.
+
+### 4.4 Lenguajes de condición permitidos
+
+- El DSL estructurado (`condition_language: "dsl"`) es el modo por defecto. Todas las validaciones de compilación aplican.
+- CEL (`condition_language: "cel"`) es un modo alternativo opt-in. La expresión se parsea en compilación (detección de errores de sintaxis), pero la validación de tipos es responsabilidad del autor del grafo. Un error de evaluación en runtime se trata como condición falsa y se registra como evento de advertencia `warning.cel_evaluation_error`.
+- No se permiten otros lenguajes de expresión. En particular, expresiones Python arbitrarias (`eval`) están explícitamente prohibidas.
+- Un edge no puede tener simultáneamente `condition` (DSL) y `condition_cel` (CEL) — es un error de compilación.
 
 ---
 
@@ -88,6 +117,13 @@ Este documento define las reglas y restricciones de negocio del sistema.
 ### 5.3 Timeout global
 - El `global_timeout_seconds` se aplica a la ejecución completa, no a nodos individuales.
 - Cuando expira, la ejecución termina en `TIMED_OUT` independientemente del nodo en curso.
+
+### 5.4 Timeout por nodo
+
+- Un nodo puede declarar `timeout_seconds` en su config. Si la ejecución del nodo supera ese tiempo, se trata como un fallo no recuperable del nodo (equivalente a reintentos agotados).
+- El timeout por nodo no cancela el timeout global (§5.3) — ambos aplican de forma independiente.
+- Un timeout de nodo sin `on_error` definido termina la ejecución en `FAILED`.
+- Se emite el evento `node.timeout` con `node_id` y `timeout_seconds`.
 
 ---
 
@@ -114,6 +150,12 @@ Este documento define las reglas y restricciones de negocio del sistema.
 
 ### 7.3 No pérdida de eventos
 - Un evento emitido **no puede perderse silenciosamente**. Si el sistema de observabilidad falla, debe registrarse el fallo — pero no puede suprimir el evento sin dejar rastro.
+
+### 7.4 ExecutionTrace
+
+- Al completar una ejecución (cualquier estado terminal), el sistema debe poder producir un `ExecutionTrace` que agrupe todos los registros de la ejecución.
+- El trace incluye: `execution_id`, `graph_id`, `graph_version`, `status`, `duration_ms`, `total_tokens`, `node_records`, `checkpoints`, `final_state`.
+- El trace es inmutable una vez que la ejecución llega a estado terminal.
 
 ---
 
@@ -170,3 +212,40 @@ Este documento define las reglas y restricciones de negocio del sistema.
 - `POST /sessions` — crear sesión para un grafo
 - `POST /sessions/{id}/message` — enviar mensaje, ejecutar grafo, recibir respuesta
 - `GET /sessions/{id}` — consultar historial y estado actual
+
+---
+
+## 11. Guardrails
+
+### 11.1 Propósito
+- Un nodo `guardrail` evalúa campos del estado contra criterios de seguridad declarados. No genera output de negocio — solo produce un resultado `pass` o `fail` con razón.
+
+### 11.2 Checks soportados
+- `pii`: detecta Información Personal Identificable en el valor del campo usando `presidio-analyzer`.
+- `toxicity`: detecta contenido tóxico o dañino (implementación heurística o LLM).
+- `custom_llm`: LLM-as-judge — evalúa el campo con un prompt configurable. La respuesta se normaliza a `pass`/`fail`.
+
+### 11.3 Routing
+- Si todos los checks pasan: la ejecución continúa por el edge normal del nodo.
+- Si algún check falla: la ejecución se redirige a `on_fail` (node_id). Si `on_fail` no está definido, la ejecución termina en `FAILED`.
+- El resultado (`pass`/`fail`) y la razón se escriben al estado en los campos declarados en `output_mapping`.
+
+### 11.4 Provider-agnostic
+- Los checks deben funcionar sin depender de proveedores específicos (no OpenAI Moderation). El check `pii` puede usar `presidio-analyzer`. El check `custom_llm` usa el modelo configurado en el nodo.
+- Si `presidio-analyzer` no está instalado y se usa el check `pii`, el nodo falla con un error claro de configuración.
+
+---
+
+## 12. Graders y Evaluación
+
+### 12.1 Propósito
+- Un grader evalúa un `ExecutionTrace` y asigna un score o label. Es un contrato de calidad sobre ejecuciones pasadas.
+
+### 12.2 Tipos de grader
+- `deterministic`: compara `final_state[field]` contra un valor esperado usando el DSL de condiciones existente. Score es 1.0 (pass) o 0.0 (fail).
+- `llm_judge`: un LLM evalúa el trace completo usando un prompt configurable. Retorna score 0.0–1.0.
+- `heuristic`: reglas sobre métricas del trace (tokens totales, duración, número de reintentos). Score es 1.0 o 0.0.
+
+### 12.3 Inmutabilidad
+- Los graders no modifican el trace. Producen un `GradeResult` asociado al trace, no parte de él.
+- Un `GradeResult` tiene: `grader_id`, `execution_id`, `score`, `label`, `reason`, `graded_at`.

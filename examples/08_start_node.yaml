@@ -1,0 +1,149 @@
+id: start-node
+version: "1.0.0"
+name: START node — contrato de entrada explícito y tipado
+entry_node: start
+
+# Patrón: el nodo de tipo `start` declara explícitamente los campos
+# que el grafo acepta como input, con sus tipos.
+#
+# Beneficios vs no usar START:
+#   - El compilador valida que cada campo de input existe en state_schema
+#   - El campo `as_text: true` expone automáticamente `input_as_text`
+#     como variable disponible para cualquier AgentNode que quiera usarla
+#   - El contrato de entrada del grafo es legible en el YAML, no implícito
+#
+# Flujo:
+#   start → classifier → route → responder → end
+
+state_schema:
+  - name: user_message
+    type: str
+    required: true
+  - name: user_id
+    type: str
+    required: true
+  - name: input_as_text    # expuesto automáticamente por as_text: true
+    type: str
+    default: ""
+  - name: intent
+    type: str
+    default: ""
+  - name: response
+    type: str
+    default: ""
+
+global_timeout_seconds: 90
+max_depth: 10
+
+nodes:
+  # START: punto de entrada declarativo. El runtime inyecta `input_as_text`
+  # antes de avanzar al siguiente nodo (SPEC §2.6).
+  # No tiene executor propio — es transparente al runtime.
+  start:
+    type: start
+    config:
+      inputs:
+        - name: user_message
+          type: str
+          as_text: true    # → inyecta input_as_text = user_message
+        - name: user_id
+          type: str
+
+  # NOTE: nodo de documentación. El runtime lo ignora completamente.
+  # Útil para explicar el flujo en el YAML sin afectar la ejecución.
+  _doc_flow:
+    type: note
+    config:
+      text: |
+        Flujo: start recibe user_message y user_id.
+        classifier lee input_as_text para clasificar el intent.
+        route despacha al agente correcto según intent.
+
+  classifier:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Clasifica el mensaje del usuario en uno de los siguientes intents:
+        - "soporte": preguntas técnicas, errores, problemas con el producto
+        - "ventas": preguntas sobre precios, planes, contratos
+        - "otro": cualquier otra consulta
+
+        Responde solo con el intent, sin explicación.
+      output_schema_inline:
+        intent:
+          type: str
+          enum: ["soporte", "ventas", "otro"]
+      state_output_mapping:
+        intent: intent
+
+  route:
+    type: condition
+    config:
+      branches:
+        - condition:
+            field: state.intent
+            operator: eq
+            value: "soporte"
+          target: soporte_agent
+        - condition:
+            field: state.intent
+            operator: eq
+            value: "ventas"
+          target: ventas_agent
+      default: general_agent
+
+  soporte_agent:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un agente de soporte técnico. Responde la consulta del usuario
+        de forma clara y con pasos concretos cuando sea necesario.
+      output_schema_inline:
+        response:
+          type: str
+      state_output_mapping:
+        response: response
+
+  ventas_agent:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un agente de ventas. Presenta las opciones disponibles de forma
+        clara y ayuda al usuario a tomar la mejor decisión para su caso.
+      output_schema_inline:
+        response:
+          type: str
+      state_output_mapping:
+        response: response
+
+  general_agent:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un agente de atención general. Responde la consulta del usuario
+        y redirige a soporte o ventas si es necesario.
+      output_schema_inline:
+        response:
+          type: str
+      state_output_mapping:
+        response: response
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: start
+    to_node: classifier
+  - from_node: classifier
+    to_node: route
+  - from_node: soporte_agent
+    to_node: end
+  - from_node: ventas_agent
+    to_node: end
+  - from_node: general_agent
+    to_node: end

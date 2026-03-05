@@ -21,9 +21,11 @@ from typing import Any
 from agentflow.core.models import (
     ExecutionState,
     ExecutionStatus,
+    ExecutionTrace,
+    GradeResult,
     GraphDefinition,
-    StateCheckpoint,
     NodeExecutionRecord,
+    StateCheckpoint,
 )
 
 
@@ -78,6 +80,22 @@ class StateManagerProtocol(ABC):
     async def cancel(self, execution_id: str) -> None:
         ...
 
+    @abstractmethod
+    async def get_node_records(self, execution_id: str) -> list[NodeExecutionRecord]:
+        ...
+
+    @abstractmethod
+    async def get_trace(self, execution_id: str) -> ExecutionTrace:
+        ...
+
+    @abstractmethod
+    async def save_grade(self, grade: GradeResult) -> None:
+        ...
+
+    @abstractmethod
+    async def get_grades(self, execution_id: str) -> list[GradeResult]:
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-Memory implementation (Phase 1)
@@ -93,6 +111,8 @@ class InMemoryStateManager(StateManagerProtocol):
         self._executions: dict[str, ExecutionState] = {}
         self._checkpoints: dict[str, list[StateCheckpoint]] = {}
         self._node_records: dict[str, list[NodeExecutionRecord]] = {}
+        self._grades: dict[str, list[GradeResult]] = {}
+        self._execution_start_times: dict[str, float] = {}  # for duration_ms
 
     async def create_execution(
         self,
@@ -128,6 +148,10 @@ class InMemoryStateManager(StateManagerProtocol):
         self._executions[state.execution_id] = copy.deepcopy(state)
         self._checkpoints[state.execution_id] = []
         self._node_records[state.execution_id] = []
+        self._grades[state.execution_id] = []
+
+        import time
+        self._execution_start_times[state.execution_id] = time.monotonic()
 
         return copy.deepcopy(state)
 
@@ -206,3 +230,44 @@ class InMemoryStateManager(StateManagerProtocol):
             )
         state.status = ExecutionStatus.CANCELLED
         state.updated_at = datetime.utcnow()
+
+    async def get_node_records(self, execution_id: str) -> list[NodeExecutionRecord]:
+        return list(self._node_records.get(execution_id, []))
+
+    async def get_trace(self, execution_id: str) -> ExecutionTrace:
+        """Build an ExecutionTrace from stored records (SPEC §7.4)."""
+        import time
+
+        state = self._executions.get(execution_id)
+        if state is None:
+            raise StateManagerError(f"Execution '{execution_id}' not found")
+
+        records = list(self._node_records.get(execution_id, []))
+        checkpoints = list(self._checkpoints.get(execution_id, []))
+
+        start_time = self._execution_start_times.get(execution_id)
+        if start_time is not None:
+            duration_ms = (time.monotonic() - start_time) * 1000
+        else:
+            duration_ms = 0.0
+
+        total_tokens = sum(r.llm_tokens_used for r in records)
+
+        return ExecutionTrace(
+            execution_id=execution_id,
+            graph_id=state.graph_id,
+            graph_version=state.graph_version,
+            status=state.status,
+            duration_ms=duration_ms,
+            total_tokens=total_tokens,
+            node_records=records,
+            checkpoints=checkpoints,
+            final_state=copy.deepcopy(state.graph_state),
+        )
+
+    async def save_grade(self, grade: GradeResult) -> None:
+        grades = self._grades.setdefault(grade.execution_id, [])
+        grades.append(grade)
+
+    async def get_grades(self, execution_id: str) -> list[GradeResult]:
+        return list(self._grades.get(execution_id, []))

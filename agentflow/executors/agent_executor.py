@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from agentflow.core.models import AgentNodeConfig, ExecutionState, NodeDefinition
 
@@ -45,6 +45,55 @@ def _resolve_schema(schema_path: str | None) -> type[BaseModel] | None:
     return cls
 
 
+_INLINE_TYPE_MAP: dict[str, type] = {
+    "str": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "list": list,
+    "dict": dict,
+    "any": Any,
+}
+
+
+def _build_inline_schema(spec: dict[str, Any], model_name: str = "InlineSchema") -> type[BaseModel]:
+    """
+    Build a Pydantic model dynamically from an inline schema spec (B4).
+
+    Spec format:
+        {
+          "field_name": {"type": "str", "enum": ["A", "B"]},
+          "other_field": {"type": "float"},
+        }
+
+    Enum fields use Literal types when enum values are provided.
+    """
+    from typing import Literal, get_args
+
+    field_definitions: dict[str, Any] = {}
+
+    for field_name, field_spec in spec.items():
+        if not isinstance(field_spec, dict):
+            # Simple shorthand: "field": "str"
+            py_type = _INLINE_TYPE_MAP.get(str(field_spec), Any)
+            field_definitions[field_name] = (py_type, ...)
+            continue
+
+        type_name = field_spec.get("type", "any")
+        py_type = _INLINE_TYPE_MAP.get(type_name, Any)
+        enum_values = field_spec.get("enum")
+
+        if enum_values:
+            # Create a Literal type from enum values
+            literal_type = Literal[tuple(enum_values)]  # type: ignore[valid-type]
+            field_definitions[field_name] = (literal_type, ...)
+        else:
+            default = field_spec.get("default", ...)
+            field_definitions[field_name] = (py_type, default)
+
+    return create_model(model_name, **field_definitions)
+
+
 class AgentExecutor:
     async def execute(
         self,
@@ -62,7 +111,13 @@ class AgentExecutor:
 
         config = AgentNodeConfig(**node_def.config)
 
-        result_type = _resolve_schema(config.output_schema)
+        # B4: inline schema takes precedence if output_schema is not set
+        if config.output_schema_inline is not None:
+            result_type: type[BaseModel] | None = _build_inline_schema(
+                config.output_schema_inline, model_name=f"{node_id}_schema"
+            )
+        else:
+            result_type = _resolve_schema(config.output_schema)
 
         agent: Agent = Agent(
             model=config.model,
