@@ -1,0 +1,152 @@
+id: parallel-enrichment
+version: "1.0.0"
+name: Parallel — enriquecimiento concurrente de datos de producto
+entry_node: load_data
+
+# Patrón: un nodo parallel lanza múltiples ramas concurrentemente con asyncio.gather.
+# Todas las ramas comparten el mismo execution_state (solo lectura) y sus outputs
+# se fusionan al estado al finalizar. La última rama en el orden de branches gana
+# en caso de conflicto de clave.
+#
+# Caso de uso: generar simultáneamente el resumen de marketing, el análisis de
+# precio competitivo y la evaluación de stock de un producto, luego consolidar.
+#
+# Flujo:
+#   load_data (set_state) → enrich (parallel) → consolidate (agent) → end
+#
+# Ramas paralelas:
+#   ├── marketing_writer (agent)  → marketing_copy
+#   ├── price_analyst (agent)     → price_analysis
+#   └── stock_checker (agent)     → stock_status
+
+state_schema:
+  - name: product_name
+    type: str
+    required: true
+  - name: product_price
+    type: float
+    required: true
+  - name: product_stock
+    type: int
+    required: true
+  - name: category
+    type: str
+    default: ""
+  - name: marketing_copy
+    type: str
+    default: ""
+  - name: price_analysis
+    type: str
+    default: ""
+  - name: stock_status
+    type: str
+    default: ""
+  - name: product_report
+    type: str
+    default: ""
+
+global_timeout_seconds: 120
+max_depth: 10
+
+nodes:
+  # SET_STATE: inyecta la categoría del producto antes del bloque paralelo.
+  # En producción este dato vendría de un ToolNode (DB o API).
+  load_data:
+    type: set_state
+    config:
+      assignments:
+        category: "Electrónica"
+
+  # PARALLEL: lanza las tres ramas concurrentemente.
+  # El runtime usa asyncio.gather — el tiempo total es el del branch más lento,
+  # no la suma de los tres.
+  enrich:
+    type: parallel
+    config:
+      branches:
+        - marketing_writer
+        - price_analyst
+        - stock_checker
+
+  # Rama 1: redacción de copy de marketing
+  marketing_writer:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un redactor de marketing experto en e-commerce.
+        Escribe un copy breve (2-3 oraciones) y atractivo para el producto indicado
+        en `product_name` de la categoría `category`. Precio: `product_price` USD.
+        Enfócate en beneficios, no en características técnicas.
+      output_schema_inline:
+        marketing_copy:
+          type: str
+      state_output_mapping:
+        marketing_copy: marketing_copy
+      timeout_seconds: 20.0
+
+  # Rama 2: análisis de precio competitivo
+  price_analyst:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un analista de precios para e-commerce.
+        Evalúa si el precio de `product_price` USD para un producto de la
+        categoría `category` es competitivo en el mercado actual.
+        Da una valoración: "bajo", "competitivo" o "premium" con una razón breve.
+      output_schema_inline:
+        price_analysis:
+          type: str
+      state_output_mapping:
+        price_analysis: price_analysis
+      timeout_seconds: 20.0
+
+  # Rama 3: evaluación de estado de stock
+  stock_checker:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Evalúa el nivel de stock del producto `product_name`.
+        Stock actual: `product_stock` unidades.
+        Clasifica como: "sin stock", "stock crítico" (1-5 unidades),
+        "stock moderado" (6-20 unidades) o "stock holgado" (>20 unidades).
+        Indica si se recomienda reposición urgente.
+      output_schema_inline:
+        stock_status:
+          type: str
+      state_output_mapping:
+        stock_status: stock_status
+      timeout_seconds: 20.0
+
+  # AgentNode consolidador: integra los tres outputs paralelos en un reporte único.
+  consolidate:
+    type: agent
+    config:
+      model: "anthropic:claude-haiku-4-5-20251001"
+      system_prompt: |
+        Eres un product manager. Consolida en un reporte estructurado la
+        siguiente información sobre el producto `product_name`:
+        - Copy de marketing: `marketing_copy`
+        - Análisis de precio: `price_analysis`
+        - Estado de stock: `stock_status`
+        Usa formato de lista con secciones claras. Sé conciso.
+      output_schema_inline:
+        product_report:
+          type: str
+      state_output_mapping:
+        product_report: product_report
+      timeout_seconds: 20.0
+
+  end:
+    type: end
+    config: {}
+
+edges:
+  - from_node: load_data
+    to_node: enrich
+  - from_node: enrich
+    to_node: consolidate
+  - from_node: consolidate
+    to_node: end

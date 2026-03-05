@@ -25,6 +25,7 @@ from agentflow.core.models import (
     GraphDefinition,
     GuardrailNodeConfig,
     NodeType,
+    ParallelNodeConfig,
     SetStateNodeConfig,
     StartNodeConfig,
     StateFieldType,
@@ -127,7 +128,8 @@ class GraphCompiler:
             if edge.from_node in adjacency:
                 adjacency[edge.from_node].append(edge.to_node)
 
-        # Add implicit reachability from on_error, ConditionNode branches, GuardrailNode on_fail
+        # Add implicit reachability from on_error, ConditionNode branches, GuardrailNode on_fail,
+        # and ParallelNode branch nodes
         for node_id, node_def in definition.nodes.items():
             if node_def.on_error and node_def.on_error in definition.nodes:
                 adjacency[node_id].append(node_def.on_error)
@@ -145,6 +147,14 @@ class GraphCompiler:
                 on_fail = node_def.config["on_fail"]
                 if on_fail in definition.nodes:
                     adjacency[node_id].append(on_fail)
+            if node_def.type == NodeType.PARALLEL and node_def.config.get("branches"):
+                try:
+                    cfg = ParallelNodeConfig(**node_def.config)
+                    for branch_node_id in cfg.branches:
+                        if branch_node_id in definition.nodes:
+                            adjacency[node_id].append(branch_node_id)
+                except Exception:
+                    pass
 
         visited: set[str] = set()
         queue: deque[str] = deque([definition.entry_node])
@@ -428,7 +438,7 @@ class GraphCompiler:
     def _check_new_node_types(
         self, definition: GraphDefinition, errors: list[CompilationError]
     ) -> None:
-        """Validate configs for SET_STATE, TRANSFORM, START, GUARDRAIL nodes."""
+        """Validate configs for SET_STATE, TRANSFORM, START, GUARDRAIL, PARALLEL nodes."""
         schema_map = {f.name: f for f in definition.state_schema}
 
         for node_id, node_def in definition.nodes.items():
@@ -440,6 +450,8 @@ class GraphCompiler:
                 self._validate_start(node_id, node_def.config, definition, errors)
             elif node_def.type == NodeType.GUARDRAIL:
                 self._validate_guardrail(node_id, node_def.config, definition, schema_map, errors)
+            elif node_def.type == NodeType.PARALLEL:
+                self._validate_parallel(node_id, node_def.config, definition, errors)
 
     def _validate_set_state(
         self,
@@ -611,6 +623,34 @@ class GraphCompiler:
                         ),
                         node_id=node_id,
                     ))
+
+    def _validate_parallel(
+        self,
+        node_id: str,
+        config: dict,
+        definition: GraphDefinition,
+        errors: list[CompilationError],
+    ) -> None:
+        try:
+            cfg = ParallelNodeConfig(**config)
+        except Exception as exc:
+            errors.append(CompilationError(
+                severity="error",
+                message=f"PARALLEL node '{node_id}' has invalid config: {exc}",
+                node_id=node_id,
+            ))
+            return
+
+        for branch_node_id in cfg.branches:
+            if branch_node_id not in definition.nodes:
+                errors.append(CompilationError(
+                    severity="error",
+                    message=(
+                        f"PARALLEL node '{node_id}' references branch node "
+                        f"'{branch_node_id}' which does not exist in nodes"
+                    ),
+                    node_id=node_id,
+                ))
 
     def _check_agent_inline_schema(
         self, definition: GraphDefinition, errors: list[CompilationError]

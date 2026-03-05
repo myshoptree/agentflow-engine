@@ -549,3 +549,150 @@ async def test_duplicate_execution_id_raises_error():
     await sm.create_execution(g, {}, execution_id="duplicate-id")
     with pytest.raises(StateManagerError, match="already exists"):
         await sm.create_execution(g, {}, execution_id="duplicate-id")
+
+
+# ---------------------------------------------------------------------------
+# B1 — TRANSFORM: extract operation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_transform_extract_dict_field():
+    """TRANSFORM: extract pulls a nested key from a dict value in state."""
+    g = GraphDefinition(
+        id="transform_extract",
+        entry_node="t",
+        state_schema=[
+            StateFieldDefinition(name="payload", type=StateFieldType.STR),
+            StateFieldDefinition(name="city", type=StateFieldType.STR),
+        ],
+        nodes={
+            "t": NodeDefinition(
+                type=NodeType.TRANSFORM,
+                config={
+                    "operations": [
+                        {
+                            "set": "city",
+                            "from_field": "state.payload",
+                            "extract": "address.city",
+                        },
+                    ]
+                },
+            ),
+            "end": end_node(),
+        },
+        edges=[Edge(from_node="t", to_node="end")],
+    )
+    # payload is a dict stored in state — we pass it as a dict directly
+    initial = {"payload": {"address": {"city": "Madrid"}}}
+    status, state, _ = await _run(g, initial)
+    assert status == ExecutionStatus.COMPLETED
+    assert state["city"] == "Madrid"
+
+
+@pytest.mark.asyncio
+async def test_transform_extract_list_index():
+    """TRANSFORM: extract supports numeric index into lists."""
+    g = GraphDefinition(
+        id="transform_extract_list",
+        entry_node="t",
+        state_schema=[
+            StateFieldDefinition(name="items", type=StateFieldType.STR),
+            StateFieldDefinition(name="first_item", type=StateFieldType.STR),
+        ],
+        nodes={
+            "t": NodeDefinition(
+                type=NodeType.TRANSFORM,
+                config={
+                    "operations": [
+                        {
+                            "set": "first_item",
+                            "from_field": "state.items",
+                            "extract": "0",
+                        },
+                    ]
+                },
+            ),
+            "end": end_node(),
+        },
+        edges=[Edge(from_node="t", to_node="end")],
+    )
+    initial = {"items": ["alpha", "beta", "gamma"]}
+    status, state, _ = await _run(g, initial)
+    assert status == ExecutionStatus.COMPLETED
+    assert state["first_item"] == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# B4 — AgentNode output_schema_inline (unit: _build_inline_schema)
+# ---------------------------------------------------------------------------
+
+def test_build_inline_schema_basic_types():
+    """_build_inline_schema builds a Pydantic model with correct field types."""
+    from agentflow.executors.agent_executor import _build_inline_schema
+
+    spec = {
+        "intent": {"type": "str"},
+        "confidence": {"type": "float"},
+        "count": {"type": "int"},
+        "active": {"type": "bool"},
+    }
+    Model = _build_inline_schema(spec, model_name="TestSchema")
+
+    instance = Model(intent="HOT", confidence=0.9, count=5, active=True)
+    assert instance.intent == "HOT"
+    assert instance.confidence == 0.9
+    assert instance.count == 5
+    assert instance.active is True
+
+
+def test_build_inline_schema_enum_field():
+    """_build_inline_schema with enum creates a Literal-constrained field."""
+    from pydantic import ValidationError
+    from agentflow.executors.agent_executor import _build_inline_schema
+
+    spec = {
+        "intent": {"type": "str", "enum": ["HOT", "WARM", "COLD"]},
+    }
+    Model = _build_inline_schema(spec, model_name="EnumSchema")
+
+    instance = Model(intent="HOT")
+    assert instance.intent == "HOT"
+
+    with pytest.raises(ValidationError):
+        Model(intent="INVALID_VALUE")
+
+
+def test_build_inline_schema_with_default():
+    """_build_inline_schema with default makes the field optional."""
+    from agentflow.executors.agent_executor import _build_inline_schema
+
+    spec = {
+        "response": {"type": "str"},
+        "score": {"type": "float", "default": 0.0},
+    }
+    Model = _build_inline_schema(spec, model_name="DefaultSchema")
+
+    # score has a default — omitting it should work
+    instance = Model(response="hello")
+    assert instance.score == 0.0
+
+
+def test_compiler_rejects_inline_schema_combined_with_output_schema():
+    """Compiler must reject AgentNode that defines both output_schema and output_schema_inline."""
+    g = GraphDefinition(
+        id="agent_dual_schema",
+        entry_node="a",
+        nodes={
+            "a": NodeDefinition(
+                type=NodeType.AGENT,
+                config={
+                    "output_schema": "some.module.SomeClass",
+                    "output_schema_inline": {"field": {"type": "str"}},
+                },
+            ),
+            "end": end_node(),
+        },
+        edges=[Edge(from_node="a", to_node="end")],
+    )
+    with pytest.raises(GraphCompilationError):
+        GraphCompiler().compile(g)

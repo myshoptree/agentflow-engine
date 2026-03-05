@@ -236,6 +236,126 @@ async def test_guardrail_pii_fail_with_mock():
 # Missing presidio — clear error
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# custom_llm check — mocked
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_guardrail_custom_llm_pass():
+    """custom_llm check passes when LLM judge answers 'no'."""
+    import agentflow.executors.guardrail_executor as ge_module
+    from agentflow.executors.tool_executor import register_tool
+
+    async def handler_llm_pass(**kwargs) -> dict:
+        return {}
+
+    register_tool("handler_llm_pass", handler_llm_pass)
+
+    g = GraphDefinition(
+        id="guardrail_custom_llm_pass",
+        entry_node="guard",
+        state_schema=[
+            StateFieldDefinition(name="response", type=StateFieldType.STR),
+            StateFieldDefinition(name="guard_result", type=StateFieldType.STR),
+        ],
+        nodes={
+            "guard": NodeDefinition(
+                type=NodeType.GUARDRAIL,
+                config={
+                    "checks": [
+                        {
+                            "type": "custom_llm",
+                            "field": "state.response",
+                            "model": "anthropic:claude-haiku-4-5-20251001",
+                            "prompt": "Is this inappropriate? Answer yes or no.",
+                        }
+                    ],
+                    "on_fail": "error_node",
+                    "output_mapping": {"guard_result": "result"},
+                },
+            ),
+            "error_node": end_node(),
+            "end": end_node(),
+        },
+        edges=[
+            Edge(from_node="guard", to_node="end"),
+            Edge(from_node="error_node", to_node="end"),
+        ],
+    )
+
+    # Mock _check_custom_llm to return pass (no LLM call)
+    original = ge_module._check_custom_llm
+
+    async def mock_custom_llm_pass(check, value):
+        return False, "LLM judge answered: no"
+
+    ge_module._check_custom_llm = mock_custom_llm_pass  # type: ignore[assignment]
+    try:
+        status, state = await _run(g, {"response": "The weather is nice today."})
+        assert status == ExecutionStatus.COMPLETED
+        assert state.get("guard_result") == "pass"
+    finally:
+        ge_module._check_custom_llm = original  # type: ignore[assignment]
+
+
+@pytest.mark.asyncio
+async def test_guardrail_custom_llm_fail_routes_to_on_fail():
+    """custom_llm check fails when LLM judge answers 'yes' → routes to on_fail."""
+    import agentflow.executors.guardrail_executor as ge_module
+    from agentflow.executors.tool_executor import register_tool
+
+    async def llm_fail_handler(**kwargs) -> dict:
+        return {"llm_blocked": True}
+
+    register_tool("llm_fail_handler", llm_fail_handler)
+
+    g = GraphDefinition(
+        id="guardrail_custom_llm_fail",
+        entry_node="guard",
+        state_schema=[
+            StateFieldDefinition(name="response", type=StateFieldType.STR),
+            StateFieldDefinition(name="llm_blocked", type=StateFieldType.BOOL),
+        ],
+        nodes={
+            "guard": NodeDefinition(
+                type=NodeType.GUARDRAIL,
+                config={
+                    "checks": [
+                        {
+                            "type": "custom_llm",
+                            "field": "state.response",
+                            "model": "anthropic:claude-haiku-4-5-20251001",
+                            "prompt": "Is this inappropriate? Answer yes or no.",
+                        }
+                    ],
+                    "on_fail": "error_node",
+                },
+            ),
+            "error_node": tool_node(
+                "llm_fail_handler", output_mapping={"llm_blocked": "llm_blocked"}
+            ),
+            "end": end_node(),
+        },
+        edges=[
+            Edge(from_node="guard", to_node="end"),
+            Edge(from_node="error_node", to_node="end"),
+        ],
+    )
+
+    original = ge_module._check_custom_llm
+
+    async def mock_custom_llm_fail(check, value):
+        return True, "LLM judge answered: yes, this violates policy"
+
+    ge_module._check_custom_llm = mock_custom_llm_fail  # type: ignore[assignment]
+    try:
+        status, state = await _run(g, {"response": "something problematic"})
+        assert status == ExecutionStatus.COMPLETED
+        assert state.get("llm_blocked") is True
+    finally:
+        ge_module._check_custom_llm = original  # type: ignore[assignment]
+
+
 @pytest.mark.asyncio
 async def test_guardrail_pii_without_presidio_raises_clear_error():
     """PII check without presidio installed should produce a FAILED execution with clear reason."""
