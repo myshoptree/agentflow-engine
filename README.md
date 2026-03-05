@@ -2,7 +2,7 @@
 
 Motor de orquestación de agentes LLM que ejecuta grafos dirigidos con estado compartido y contratos estructurados. No es un chatbot builder — es un runtime de orquestación (AI Workflow Operating System).
 
-**Stack:** Python 3.11+ · Pydantic AI · FastAPI · async/await
+**Stack:** Python 3.11+ · Pydantic AI · async/await
 
 ---
 
@@ -23,8 +23,13 @@ entrada → [AgentNode] → [ConditionNode] → [AgentNode] → fin
 | `agent` | Ejecuta un LLM vía Pydantic AI, produce structured output |
 | `condition` | Evalúa condiciones sobre el estado sin LLM — bifurca el flujo |
 | `tool` | Ejecuta una acción externa (API, DB, webhook) |
-| `parallel` | Ejecuta ramas en paralelo con `asyncio.gather` |
+| `parallel` | Ejecuta ramas concurrentemente con `asyncio.gather` |
 | `human_input` | Suspende la ejecución esperando input externo |
+| `set_state` | Asigna valores literales o referencias al estado sin LLM |
+| `transform` | Aplica operaciones declarativas sobre el estado (set, template, extract, cast) |
+| `start` | Punto de entrada declarativo con contrato explícito de inputs |
+| `guardrail` | Evalúa campos del estado contra criterios de seguridad (PII, toxicidad, LLM-judge) |
+| `note` | Documentación embebida en el grafo — invisible en runtime |
 | `end` | Finaliza la ejecución → `COMPLETED` |
 
 ### Estados de ejecución
@@ -45,7 +50,7 @@ Requiere [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone <repo>
-cd agentflow
+cd agentflow-graph
 uv sync
 cp .env.example .env   # agregar API keys
 ```
@@ -66,13 +71,13 @@ uv run python run.py --yaml examples/sales_router_condition.yaml "quiero comprar
 
 # Modo chat interactivo multi-turno
 uv run python run.py --yaml examples/sales_router.yaml --chat
+```
 
-uv run python run.py --yaml examples/01_evaluator_loop.yaml "inteligencia artificial en medicina"
-uv run python run.py --yaml examples/02_sequential_pipeline.yaml "me cobraron dos veces el mes pasado"
-uv run python run.py --yaml examples/03_tool_plus_agent.yaml  # requiere user_id en state
-uv run python run.py --yaml examples/04_supervisor.yaml "no puedo acceder a mi cuenta"
-uv run python run.py --yaml examples/05_error_handling.yaml "procesa esto"
+### Ejecutar tests
 
+```bash
+uv run pytest
+uv run pytest agentflow/tests/test_parallel_node.py -v
 ```
 
 ---
@@ -95,14 +100,18 @@ state_schema:
     default: ""
 
 global_timeout_seconds: 60
-max_depth: 20
+max_depth: 20          # guardia contra loops infinitos (default: 50)
 
 nodes:
   inicio:
     type: agent
     config:
-      model: "anthropic:claude-sonnet-4-6"
+      model: "anthropic:claude-haiku-4-5-20251001"
       system_prompt: "Clasifica la intención del usuario."
+      output_schema_inline:
+        intent:
+          type: str
+          enum: ["HOT", "WARM", "COLD"]
       state_output_mapping:
         intent: intent
 
@@ -116,8 +125,6 @@ edges:
 ```
 
 ### ConditionNode con branches AND/OR
-
-Alternativa más expresiva a múltiples edges condicionales:
 
 ```yaml
 check_intent:
@@ -136,9 +143,89 @@ check_intent:
     default: nurture
 ```
 
-### Operadores de condición
+### SET_STATE y TRANSFORM
 
-`eq` · `neq` · `gt` · `lt` · `gte` · `lte` · `in` · `contains` · `is_null`
+```yaml
+# Inicializa estado antes de un loop
+reset:
+  type: set_state
+  config:
+    assignments:
+      iteration: 0
+      status: "pending"
+
+# Construye un campo derivado sin LLM
+enrich:
+  type: transform
+  config:
+    operations:
+      - set: display_name
+        template: "{state.product_name} (${state.product_price})"
+      - set: count_int
+        from_field: state.count_str
+        cast: int
+```
+
+### GUARDRAIL
+
+```yaml
+content_guard:
+  type: guardrail
+  on_error: safety_handler
+  config:
+    checks:
+      - type: toxicity
+        field: state.response
+      - type: custom_llm
+        field: state.response
+        model: "anthropic:claude-haiku-4-5-20251001"
+        prompt: "¿Contiene este texto información sensible? Responde yes o no."
+    on_fail: safety_handler
+    output_mapping:
+      guard_result: result
+      guard_reason: reason
+```
+
+### Timeout por nodo
+
+```yaml
+fetch_external:
+  type: tool
+  on_error: fallback_fetch
+  config:
+    tool_name: "fetch_product_from_api"
+    timeout_seconds: 3.0   # asyncio.wait_for — interrumpe mid-ejecución
+    input_mapping:
+      product_id: product_id
+    output_mapping:
+      product_name: name
+```
+
+### Condiciones: operadores DSL y CEL
+
+**DSL** (default): `eq` · `neq` · `gt` · `lt` · `gte` · `lte` · `in` · `contains` · `is_null`
+
+```yaml
+edges:
+  - from_node: classifier
+    to_node: closer
+    condition:
+      field: state.intent
+      operator: eq
+      value: "HOT"
+    priority: 10
+```
+
+**CEL** (opt-in por edge):
+
+```yaml
+edges:
+  - from_node: classifier
+    to_node: vip_handler
+    condition_language: cel
+    condition_cel: "state.score >= 0.9 && state.plan == 'enterprise'"
+    priority: 20
+```
 
 Las condiciones usan dot-notation: `state.intent` → `graph_state["intent"]`. Nunca se usa `eval()`.
 
@@ -149,35 +236,56 @@ Las condiciones usan dot-notation: `state.intent` → `graph_state["intent"]`. N
 ```
 agentflow/
 ├── core/
-│   ├── models.py          # GraphDefinition, NodeDefinition, Edge, ExecutionState
+│   ├── models.py          # GraphDefinition, NodeDefinition, Edge, ExecutionState, ExecutionTrace
 │   ├── compiler.py        # GraphCompiler → CompiledGraph (validación estática)
 │   ├── runtime.py         # ExecutionRuntime (ciclo principal)
-│   ├── state_manager.py   # InMemoryStateManager
+│   ├── state_manager.py   # InMemoryStateManager con checkpointing y graders
 │   ├── session_manager.py # InMemorySessionManager (conversaciones multi-turno)
-│   └── observability.py   # StructuredLogger — eventos JSON
+│   ├── grader.py          # GraderRunner — evaluación de ExecutionTrace
+│   └── observability.py   # StructuredLogger — eventos JSON estructurados
 ├── executors/
-│   ├── agent_executor.py
+│   ├── agent_executor.py      # Pydantic AI + output_schema_inline
 │   ├── condition_executor.py
 │   ├── tool_executor.py
 │   ├── parallel_executor.py
+│   ├── set_state_executor.py
+│   ├── transform_executor.py
+│   ├── guardrail_executor.py
 │   └── registry.py
 ├── dsl/
-│   └── condition_parser.py  # DSL seguro para condiciones
+│   └── condition_parser.py  # DSL seguro + evaluate_cel_condition
 └── tests/
+    ├── test_compiler.py
+    ├── test_runtime.py
+    ├── test_condition_node.py
+    ├── test_retry_policy.py
+    ├── test_new_node_types.py   # NOTE, SET_STATE, TRANSFORM, START, timeout, inline schema
+    ├── test_parallel_node.py    # PARALLEL: concurrencia, merge, fallos
+    ├── test_guardrail.py        # GUARDRAIL: toxicity, PII, custom_llm
+    ├── test_grader.py           # GraderRunner: deterministic, heuristic, llm_judge
+    └── test_cel_conditions.py   # CEL: sintaxis, fallback, evento de advertencia
 
 examples/
-├── sales_router.yaml              # Router con edges condicionales
-├── sales_router_condition.yaml    # Router con ConditionNode AND/OR
-├── 01_evaluator_loop.yaml         # Loop con score y feedback
-├── 02_sequential_pipeline.yaml    # Pipeline de 4 agentes en cadena
-├── 03_tool_plus_agent.yaml        # ToolNode + AgentNode personalizado
-├── 04_supervisor.yaml             # Supervisor que delega a especialistas
-├── 05_error_handling.yaml         # on_error routing y fallback
-├── 06_human_in_the_loop.yaml      # Suspend/resume con confirmación humana
-├── schemas.py                     # Pydantic output schemas de los ejemplos
-└── tools.py                       # Tools simuladas para el ejemplo 03
+├── sales_router.yaml                    # Router con edges condicionales
+├── sales_router_condition.yaml          # Router con ConditionNode AND/OR
+├── 01_evaluator_loop.yaml               # Loop con score y feedback
+├── 02_sequential_pipeline.yaml          # Pipeline de 4 agentes en cadena
+├── 03_tool_plus_agent.yaml              # ToolNode + AgentNode personalizado
+├── 04_supervisor.yaml                   # Supervisor que delega a especialistas
+├── 05_error_handling.yaml               # on_error routing y fallback
+├── 06_human_in_the_loop.yaml            # Suspend/resume con confirmación humana
+├── 07_set_state_and_transform.yaml      # SET_STATE, TRANSFORM, output_schema_inline
+├── 08_start_node.yaml                   # START con contrato de inputs explícito
+├── 09_guardrail.yaml                    # GUARDRAIL con toxicity + custom_llm
+├── 10_node_timeout.yaml                 # timeout_seconds por nodo + circuit breaker
+├── 11_evaluator_loop_with_set_state.yaml# Variante del evaluator loop con SET_STATE
+├── 12_parallel.yaml                     # PARALLEL: enriquecimiento concurrente
+├── schemas.py                           # Pydantic output schemas de los ejemplos
+└── tools.py                             # Tools simuladas (productos, usuarios)
 
-run.py                             # Script de demo CLI
+run.py    # Script de demo CLI
+SPEC.md   # Especificaciones de negocio — fuente de verdad
+docs/     # Documentación técnica y changelogs
 ```
 
 ---
@@ -195,7 +303,7 @@ uv run python run.py --yaml examples/<archivo>.yaml "<mensaje>"
 ### Router con ConditionNode AND/OR
 **`sales_router_condition.yaml`**
 
-Clasifica la intención del usuario y bifurca el flujo. Demuestra `ConditionNode` con condiciones compuestas AND/OR.
+Clasifica la intención del usuario y bifurca el flujo con condiciones compuestas AND/OR.
 
 ```
 classifier → check_intent (condition) → closer   [HOT + confidence >= 0.8]
@@ -217,7 +325,6 @@ Un agente genera contenido, otro lo evalúa con score numérico. Si el score es 
 ```
 writer → evaluator → check_quality → publisher → end  [score >= 0.8]
             ↑                      → writer            [score < 0.8]
-            └──────────────────────────────────
 ```
 
 ```bash
@@ -229,7 +336,7 @@ uv run python run.py --yaml examples/01_evaluator_loop.yaml "inteligencia artifi
 ### Pipeline Secuencial
 **`02_sequential_pipeline.yaml`**
 
-Cuatro agentes en cadena donde cada uno enriquece el estado: extrae entidades, analiza sentimiento e intención, define estrategia y redacta la respuesta final.
+Cuatro agentes en cadena donde cada uno enriquece el estado.
 
 ```
 extractor → analyzer → strategist → responder → end
@@ -261,14 +368,10 @@ uv run python run.py --yaml examples/03_tool_plus_agent.yaml "¿cómo puedo ver 
 ### Supervisor
 **`04_supervisor.yaml`**
 
-Un agente supervisor analiza la solicitud y decide a qué especialista derivar. El `ConditionNode` lee la decisión y rutea al especialista correspondiente.
+Un agente supervisor decide a qué especialista derivar.
 
 ```
-supervisor → route_to_specialist (condition) → billing_agent
-                                             → technical_agent
-                                             → account_agent
-                                             → sales_agent
-                                             → general_agent  [default]
+supervisor → route (condition) → billing_agent | technical_agent | account_agent | general_agent
 ```
 
 ```bash
@@ -280,10 +383,10 @@ uv run python run.py --yaml examples/04_supervisor.yaml "no puedo acceder a mi c
 ### Error Handling
 **`05_error_handling.yaml`**
 
-Demuestra `on_error` routing (SPEC §5.2): si el nodo principal falla después de reintentos, el runtime lo redirige al `error_handler` en vez de terminar en `FAILED`.
+Demuestra `on_error` routing: si el nodo principal falla, el runtime redirige al `error_handler`.
 
 ```
-risky_agent ──[on_error]──→ error_handler → error_end
+risky_agent ──[on_error]──→ error_handler → end
      ↓
 check_result → success_end
 ```
@@ -297,7 +400,7 @@ uv run python run.py --yaml examples/05_error_handling.yaml "procesa esta solici
 ### Human-in-the-loop
 **`06_human_in_the_loop.yaml`**
 
-La ejecución se **suspende** en el nodo `human_input` esperando confirmación antes de ejecutar una acción de alto impacto. `run.py` muestra el resumen y el nivel de impacto, y espera la respuesta del usuario antes de resumir.
+La ejecución se **suspende** en el nodo `human_input` esperando confirmación antes de ejecutar una acción de alto impacto.
 
 ```
 analyzer → await_confirmation (human_input) ← SUSPENDED
@@ -312,15 +415,188 @@ uv run python run.py --yaml examples/06_human_in_the_loop.yaml "elimina todos lo
 
 ---
 
-## Tests
+### SET_STATE y TRANSFORM
+**`07_set_state_and_transform.yaml`**
+
+Demuestra `set_state` para inicializar estado, `transform` con template y cast, y `output_schema_inline` para definir el schema del agente directamente en YAML.
+
+```
+initialize (set_state) → greet (agent) → enrich (transform) → responder (agent) → end
+```
 
 ```bash
-uv run pytest
-uv run pytest agentflow/tests/test_condition_node.py -v
+uv run python run.py --yaml examples/07_set_state_and_transform.yaml "Hola"
+```
+
+---
+
+### START node
+**`08_start_node.yaml`**
+
+Demuestra el nodo `start` con contrato explícito de inputs y el nodo `note` para documentación embebida.
+
+```
+start → classifier (agent) → check_intent (condition) → specialist | general → end
+```
+
+```bash
+uv run python run.py --yaml examples/08_start_node.yaml "quiero cancelar mi suscripción"
+```
+
+---
+
+### GUARDRAIL
+**`09_guardrail.yaml`**
+
+El agente genera una respuesta → el guardrail la evalúa antes de publicarla. Si detecta contenido problemático, redirige al `safety_handler`.
+
+```
+responder → content_guard (guardrail) → end
+                    ↓ [on_fail]
+             safety_handler → end
+```
+
+```bash
+uv run python run.py --yaml examples/09_guardrail.yaml "¿cómo puedo ayudarte?"
+```
+
+---
+
+### Timeout por nodo
+**`10_node_timeout.yaml`**
+
+Demuestra `timeout_seconds` por nodo como circuit breaker: si la API externa no responde en 3s, `on_error` activa el fallback de caché.
+
+```
+fetch_external (tool, timeout=3s) ──[on_error]──→ fallback_fetch → enrich → responder → end
+        ↓ [happy path]
+      enrich → responder → end
+```
+
+```bash
+uv run python run.py --yaml examples/10_node_timeout.yaml "producto p001"
+# Con timeout simulado:
+SIMULATE_SLOW_API=true uv run python run.py --yaml examples/10_node_timeout.yaml "producto p001"
+```
+
+---
+
+### Evaluator Loop con SET_STATE
+**`11_evaluator_loop_with_set_state.yaml`**
+
+Variante del evaluator loop clásico que usa `set_state` para inicializar el contador de iteraciones y un nodo `note` para documentar una limitación del DSL.
+
+```
+reset_counter (set_state) → writer → evaluator → check →
+  ├─ score >= 0.8    → publisher → end
+  ├─ iteration >= 3  → force_publish → end
+  └─ default         → increment (set_state) → writer
+```
+
+```bash
+uv run python run.py --yaml examples/11_evaluator_loop_with_set_state.yaml "el cambio climático"
+```
+
+---
+
+### Parallel — enriquecimiento concurrente
+**`12_parallel.yaml`**
+
+Tres agentes ejecutan en paralelo con `asyncio.gather` — marketing, análisis de precio y estado de stock — y un cuarto consolida los resultados.
+
+```
+load_data (set_state) → enrich (parallel) ──┬── marketing_writer ──┐
+                                            ├── price_analyst     ──┼→ consolidate → end
+                                            └── stock_checker     ──┘
+```
+
+```bash
+uv run python run.py --yaml examples/12_parallel.yaml "Laptop Pro 15"
+```
+
+---
+
+## Capacidades avanzadas
+
+### output_schema_inline
+
+Define el schema de output del agente directamente en YAML, sin necesitar un módulo Python externo:
+
+```yaml
+my_agent:
+  type: agent
+  config:
+    model: "anthropic:claude-haiku-4-5-20251001"
+    system_prompt: "Clasifica la intención."
+    output_schema_inline:
+      intent:
+        type: str
+        enum: ["HOT", "WARM", "COLD"]
+      confidence:
+        type: float
+    state_output_mapping:
+      intent: intent
+      confidence: confidence
+```
+
+### ExecutionTrace y Graders
+
+Evalúa la calidad de ejecuciones pasadas:
+
+```python
+from agentflow.core.grader import GraderRunner
+from agentflow.core.models import Grader, GraderType
+
+trace = await sm.get_trace(execution_id)
+
+runner = GraderRunner()
+
+# Determinista: compara estado final con valor esperado
+result = await runner.grade(trace, Grader(
+    id="intent_check",
+    name="Intent Check",
+    type=GraderType.DETERMINISTIC,
+    config={"field": "state.intent", "operator": "eq", "value": "HOT"},
+))
+
+# Heurístico: evalúa métricas del trace
+result = await runner.grade(trace, Grader(
+    id="perf_check",
+    name="Performance",
+    type=GraderType.HEURISTIC,
+    config={"max_tokens": 5000, "max_duration_ms": 10000},
+))
+```
+
+### Sesiones multi-turno
+
+```python
+from agentflow.core.session_manager import InMemorySessionManager
+
+sm = InMemorySessionManager(state_manager)
+session = await sm.create_session(graph_id="sales-router", graph_version="1.0.0")
+
+# Primer mensaje
+response = await sm.send_message(session.session_id, "Hola, quiero información")
+
+# Segundo mensaje — historial completo disponible en el agente
+response = await sm.send_message(session.session_id, "¿Cuánto cuesta el plan Pro?")
 ```
 
 ---
 
 ## Variables de entorno
 
-Copiar `.env.example` a `.env` y configurar las API keys necesarias según el modelo usado en los grafos (`anthropic:...`, `openai:...`, etc.).
+Copiar `.env.example` a `.env` y configurar las API keys según el modelo usado (`anthropic:...`, `openai:...`, etc.).
+
+### Dependencias opcionales
+
+| Paquete | Para qué |
+|---------|----------|
+| `google-cel-python` | Condiciones CEL en edges (`condition_language: cel`) |
+| `presidio-analyzer` | Check PII en nodos GUARDRAIL (`type: pii`) |
+
+```bash
+uv add google-cel-python   # opcional
+uv add presidio-analyzer   # opcional
+```
