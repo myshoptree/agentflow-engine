@@ -42,7 +42,7 @@ Si durante la implementación surge un comportamiento, restricción o decisión 
 ## Estructura del Proyecto
 
 ```
-agentflow/
+agentflow/              ← paquete instalable
 ├── core/
 │   ├── models.py          # GraphDefinition, NodeDefinition, Edge, ExecutionState, ExecutionTrace
 │   ├── compiler.py        # GraphCompiler → CompiledGraph (validación estática completa)
@@ -60,18 +60,19 @@ agentflow/
 │   ├── transform_executor.py  # TRANSFORM con regex template (SPEC §3.5)
 │   ├── guardrail_executor.py  # PII, toxicity, custom_llm (SPEC §11)
 │   └── registry.py
-├── dsl/
-│   └── condition_parser.py  # DSL seguro + evaluate_cel_condition (SPEC §4.4)
-└── tests/
-    ├── test_compiler.py
-    ├── test_runtime.py
-    ├── test_condition_node.py     # ConditionNode con branches AND/OR
-    ├── test_retry_policy.py
-    ├── test_new_node_types.py     # NOTE, SET_STATE, TRANSFORM, START, timeout, inline schema
-    ├── test_parallel_node.py      # PARALLEL: concurrencia, merge, fallos, compilador
-    ├── test_guardrail.py          # toxicity, PII, custom_llm
-    ├── test_grader.py             # deterministic, heuristic, llm_judge
-    └── test_cel_conditions.py     # CEL: sintaxis, fallback, advertencia
+└── dsl/
+    └── condition_parser.py  # DSL seguro + evaluate_cel_condition (SPEC §4.4)
+
+tests/                  ← no se instalan con el paquete
+├── test_compiler.py
+├── test_runtime.py
+├── test_condition_node.py     # ConditionNode con branches AND/OR
+├── test_retry_policy.py
+├── test_new_node_types.py     # NOTE, SET_STATE, TRANSFORM, START, timeout, inline schema
+├── test_parallel_node.py      # PARALLEL: concurrencia, merge, fallos, compilador
+├── test_guardrail.py          # toxicity, PII, custom_llm
+├── test_grader.py             # deterministic, heuristic, llm_judge
+└── test_cel_conditions.py     # CEL: sintaxis, fallback, advertencia
 
 examples/
 ├── sales_router.yaml                     # Router con edges condicionales
@@ -286,7 +287,7 @@ result = await agent.run(user_message)
 ## Herramientas de desarrollo
 
 - **Package manager**: `uv` — usar siempre `uv run`, `uv sync`, `uv add`
-- **Run tests**: `uv run pytest`
+- **Run tests**: `uv run pytest` (tests en `tests/`, fuera del paquete)
 - **Run demo**: `uv run python run.py --yaml examples/sales_router.yaml "mensaje"`
 - **Variables de entorno**: copiar `.env.example` a `.env` — nunca commitear `.env`
 - **Dependencias opcionales**: `uv add google-cel-python` (CEL), `uv add presidio-analyzer` (PII)

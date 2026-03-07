@@ -16,10 +16,10 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["agentflow/tests"]
+testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["agentflow", "examples"]
+packages = ["agentflow"]
 
 [dependency-groups]
 dev = [

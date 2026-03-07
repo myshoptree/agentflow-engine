@@ -46,6 +46,26 @@ PENDING → RUNNING → COMPLETED
 
 ## Instalación
 
+### Como librería en otro proyecto (repo privado de GitHub)
+
+```bash
+# Con pip
+pip install git+https://<TOKEN>@github.com/tu-org/agentflow-graph.git
+
+# Con uv
+uv add git+https://<TOKEN>@github.com/tu-org/agentflow-graph.git
+```
+
+O en el `pyproject.toml` del microservicio:
+
+```toml
+dependencies = [
+    "agentflow @ git+https://${GITHUB_TOKEN}@github.com/tu-org/agentflow-graph.git",
+]
+```
+
+### Para desarrollo local
+
 Requiere [uv](https://docs.astral.sh/uv/).
 
 ```bash
@@ -77,7 +97,39 @@ uv run python run.py --yaml examples/sales_router.yaml --chat
 
 ```bash
 uv run pytest
-uv run pytest agentflow/tests/test_parallel_node.py -v
+uv run pytest tests/test_parallel_node.py -v
+```
+
+### Uso como librería en un microservicio
+
+```python
+import yaml
+from agentflow import (
+    GraphDefinition,
+    GraphCompiler,
+    ExecutionRuntime,
+    InMemoryStateManager,
+    InMemorySessionManager,
+    ExecutionStatus,
+    MessageRole,
+)
+
+# 1. Cargar y compilar el grafo (una vez al iniciar)
+with open("my_graph.yaml") as f:
+    graph_def = GraphDefinition(**yaml.safe_load(f))
+
+compiler = GraphCompiler()
+compiled = compiler.compile(graph_def)
+
+# 2. Ejecutar
+state_manager = InMemoryStateManager()
+exec_state = await state_manager.create_execution(graph_def, {"user_input": "hola"})
+runtime = ExecutionRuntime(state_manager)
+final = await runtime.run(compiled, exec_state)
+
+# 3. Leer resultado
+if final.status == ExecutionStatus.COMPLETED:
+    response = final.graph_state.get("response")
 ```
 
 ---
@@ -234,7 +286,7 @@ Las condiciones usan dot-notation: `state.intent` → `graph_state["intent"]`. N
 ## Estructura del proyecto
 
 ```
-agentflow/
+agentflow/              ← paquete instalable
 ├── core/
 │   ├── models.py          # GraphDefinition, NodeDefinition, Edge, ExecutionState, ExecutionTrace
 │   ├── compiler.py        # GraphCompiler → CompiledGraph (validación estática)
@@ -252,18 +304,19 @@ agentflow/
 │   ├── transform_executor.py
 │   ├── guardrail_executor.py
 │   └── registry.py
-├── dsl/
-│   └── condition_parser.py  # DSL seguro + evaluate_cel_condition
-└── tests/
-    ├── test_compiler.py
-    ├── test_runtime.py
-    ├── test_condition_node.py
-    ├── test_retry_policy.py
-    ├── test_new_node_types.py   # NOTE, SET_STATE, TRANSFORM, START, timeout, inline schema
-    ├── test_parallel_node.py    # PARALLEL: concurrencia, merge, fallos
-    ├── test_guardrail.py        # GUARDRAIL: toxicity, PII, custom_llm
-    ├── test_grader.py           # GraderRunner: deterministic, heuristic, llm_judge
-    └── test_cel_conditions.py   # CEL: sintaxis, fallback, evento de advertencia
+└── dsl/
+    └── condition_parser.py  # DSL seguro + evaluate_cel_condition
+
+tests/                  ← no se instalan
+├── test_compiler.py
+├── test_runtime.py
+├── test_condition_node.py
+├── test_retry_policy.py
+├── test_new_node_types.py   # NOTE, SET_STATE, TRANSFORM, START, timeout, inline schema
+├── test_parallel_node.py    # PARALLEL: concurrencia, merge, fallos
+├── test_guardrail.py        # GUARDRAIL: toxicity, PII, custom_llm
+├── test_grader.py           # GraderRunner: deterministic, heuristic, llm_judge
+└── test_cel_conditions.py   # CEL: sintaxis, fallback, evento de advertencia
 
 examples/
 ├── sales_router.yaml                    # Router con edges condicionales
@@ -544,11 +597,9 @@ my_agent:
 Evalúa la calidad de ejecuciones pasadas:
 
 ```python
-from agentflow.core.grader import GraderRunner
-from agentflow.core.models import Grader, GraderType
+from agentflow import GraderRunner, Grader, GraderType
 
-trace = await sm.get_trace(execution_id)
-
+trace = await state_manager.get_trace(execution_id)
 runner = GraderRunner()
 
 # Determinista: compara estado final con valor esperado
@@ -571,16 +622,11 @@ result = await runner.grade(trace, Grader(
 ### Sesiones multi-turno
 
 ```python
-from agentflow.core.session_manager import InMemorySessionManager
+from agentflow import InMemorySessionManager, InMemoryStateManager
 
-sm = InMemorySessionManager(state_manager)
+state_manager = InMemoryStateManager()
+sm = InMemorySessionManager()
 session = await sm.create_session(graph_id="sales-router", graph_version="1.0.0")
-
-# Primer mensaje
-response = await sm.send_message(session.session_id, "Hola, quiero información")
-
-# Segundo mensaje — historial completo disponible en el agente
-response = await sm.send_message(session.session_id, "¿Cuánto cuesta el plan Pro?")
 ```
 
 ---
