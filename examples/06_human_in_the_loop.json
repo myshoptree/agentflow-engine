@@ -39,27 +39,6 @@
         },
         "on_error": null
       },
-      "check_confirmation": {
-        "type": "condition",
-        "config": {
-          "branches": [
-            {
-              "condition": {
-                "operator": "or",
-                "conditions": [
-                  { "field": "state.confirmation", "operator": "eq", "value": "si" },
-                  { "field": "state.confirmation", "operator": "eq", "value": "sí" },
-                  { "field": "state.confirmation", "operator": "eq", "value": "yes" },
-                  { "field": "state.confirmation", "operator": "eq", "value": "s" }
-                ]
-              },
-              "target": "executor"
-            }
-          ],
-          "default": "canceller"
-        },
-        "on_error": null
-      },
       "executor": {
         "type": "agent",
         "config": {
@@ -96,9 +75,11 @@
     },
     "edges": [
       { "from_node": "analyzer", "to_node": "await_confirmation", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
-      { "from_node": "await_confirmation", "to_node": "check_confirmation", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
-      { "from_node": "check_confirmation", "to_node": "executor", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
-      { "from_node": "check_confirmation", "to_node": "canceller", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
+      { "from_node": "await_confirmation", "to_node": "executor", "condition": { "field": "state.confirmation", "operator": "eq", "value": "si" }, "condition_cel": null, "condition_language": "dsl", "priority": 10 },
+      { "from_node": "await_confirmation", "to_node": "executor", "condition": { "field": "state.confirmation", "operator": "eq", "value": "sí" }, "condition_cel": null, "condition_language": "dsl", "priority": 10 },
+      { "from_node": "await_confirmation", "to_node": "executor", "condition": { "field": "state.confirmation", "operator": "eq", "value": "yes" }, "condition_cel": null, "condition_language": "dsl", "priority": 10 },
+      { "from_node": "await_confirmation", "to_node": "executor", "condition": { "field": "state.confirmation", "operator": "eq", "value": "s" }, "condition_cel": null, "condition_language": "dsl", "priority": 10 },
+      { "from_node": "await_confirmation", "to_node": "canceller", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
       { "from_node": "executor", "to_node": "end", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
       { "from_node": "canceller", "to_node": "end", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 }
     ],
