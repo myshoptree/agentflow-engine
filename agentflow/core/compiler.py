@@ -116,7 +116,6 @@ class GraphCompiler:
         self, definition: GraphDefinition, warnings: list[CompilationError]
     ) -> None:
         """BFS from entry_node — unreachable nodes produce a warning (SPEC §2.3).
-        NOTE nodes are excluded from reachability checks (A1 — they are transparent).
 
         Implicit edges included in the BFS:
         - on_error targets on any NodeDefinition
@@ -168,9 +167,6 @@ class GraphCompiler:
                     queue.append(neighbor)
 
         for node_id, node_def in definition.nodes.items():
-            # NOTE nodes are documentation-only — skip reachability check (SPEC A1)
-            if node_def.type == NodeType.NOTE:
-                continue
             if node_id not in visited:
                 warnings.append(CompilationError(
                     severity="warning",

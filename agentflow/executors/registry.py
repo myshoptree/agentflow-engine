@@ -43,8 +43,8 @@ def get_executor(node_type: NodeType, compiled_graph: "CompiledGraph") -> Any:
         return TransformExecutor()
     if node_type == NodeType.GUARDRAIL:
         return GuardrailExecutor()
-    # NOTE and START are handled directly in the runtime loop (no executor)
-    if node_type in (NodeType.NOTE, NodeType.START):
+    # START is handled directly in the runtime loop (no executor)
+    if node_type == NodeType.START:
         return _NoOpExecutor()
 
     raise UnknownNodeTypeError(f"No executor registered for node type '{node_type}'")
@@ -57,7 +57,7 @@ class _EndExecutor:
 
 
 class _NoOpExecutor:
-    """Sentinel for nodes handled entirely by the runtime loop (NOTE, START)."""
+    """Sentinel for nodes handled entirely by the runtime loop (START)."""
     async def execute(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return {}
 

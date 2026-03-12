@@ -10,7 +10,6 @@
 | `parallel` | `ParallelExecutor` | `ParallelNodeConfig` | Ejecuta ramas en paralelo con `asyncio.gather` |
 | `human_input` | `_HumanInputExecutor` | `HumanInputNodeConfig` | Suspende ejecución esperando input externo |
 | `end` | `_EndExecutor` | `EndNodeConfig` | Finaliza ejecución → COMPLETED |
-| `note` | `_NoOpExecutor` | `NoteNodeConfig` | Documentación embebida — invisible al runtime |
 | `set_state` | `SetStateExecutor` | `SetStateNodeConfig` | Asigna literales o referencias al estado sin LLM |
 | `transform` | `TransformExecutor` | `TransformNodeConfig` | Operaciones declarativas: set, template, extract, cast |
 | `start` | `_NoOpExecutor` | `StartNodeConfig` | Punto de entrada declarativo con contrato de inputs |
@@ -203,7 +202,6 @@ done:
 |-----------|-----------|-------------|
 | Llega a nodo `END` | `COMPLETED` | Terminación exitosa con checkpoint final |
 | Nodo sin transición válida | `FAILED` | Error: "No valid transition from node 'xxx'" |
-| `NOTE` sin outgoing edge | `COMPLETED` | Caso especial — documentación terminal |
 | `START` sin outgoing edge | `FAILED` | Error de configuración |
 | `max_depth` excedido | `FAILED` | Guardia anti-loop activada |
 | `global_timeout` excedido | `TIMED_OUT` | Timeout global de la ejecución |
@@ -242,27 +240,6 @@ edges:
   - from_node: classifier
     to_node: done          # ← Termina en END
 ```
-
----
-
-### `note`
-
-Documentación embebida en el grafo. Invisible al compilador (sin warning) y al runtime.
-
-```yaml
-docs:
-  type: note
-  config:
-    text: |
-      Este grafo implementa un router de ventas.
-      El nodo classifier determina el intent del usuario.
-```
-
-**Campos de configuración (`NoteNodeConfig`):**
-
-| Campo | Tipo | Default | Descripción |
-|-------|------|---------|-------------|
-| `text` | `str` | `""` | Texto de documentación |
 
 ---
 
@@ -402,7 +379,6 @@ safety_check:
 | Nodo | Runtime Handling | Executor | Output |
 |------|------------------|----------|--------|
 | `START` | Inyecta `input_as_text`, avanza | `_NoOpExecutor` | `{}` |
-| `NOTE` | Transparente, avanza | `_NoOpExecutor` | `{}` |
 | `END` | Checkpoint, `COMPLETED` | `_EndExecutor` | `{}` |
 | `HUMAN_INPUT` | Suspende (`SUSPENDED`), espera `resume()` | `_HumanInputExecutor` | — |
 | `AGENT` | Dispatch → executor | `AgentExecutor` | `state_output_mapping` |
@@ -444,6 +420,5 @@ agentflow/
 - §5 — ToolNode y on_error routing
 - §6 — HumanInputNode y suspensión
 - §11 — GuardrailNode y checks de seguridad
-- SPEC A1 — NOTE node (transparente)
 - SPEC B2 — START node (contrato de inputs)
 - SPEC B4 — output_schema_inline

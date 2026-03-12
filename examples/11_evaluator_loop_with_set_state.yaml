@@ -119,17 +119,11 @@ nodes:
         # En producción se usaría un ToolNode con lógica aritmética
         iteration: 1   # placeholder — ver nota abajo
 
-  # NOTE: documentación del workaround de incremento.
-  _nota_incremento:
-    type: note
-    config:
-      text: |
-        El incremento de `iteration` con set_state solo puede asignar
-        valores literales o referencias al estado actual, no aritmética.
-        Para un contador real, usar un ToolNode que lea y sume.
-        En este ejemplo el control de iteraciones lo hace max_depth como
-        guardia final (SPEC §2.4), y el ConditionNode chequea iteration >= 3
-        que se controlaría con un tool real en producción.
+  # Nota: El incremento de `iteration` con set_state solo puede asignar
+  # valores literales o referencias al estado actual, no aritmética.
+  # Para un contador real, usar un ToolNode que lea y sume.
+  # En este ejemplo el control de iteraciones lo hace max_depth como
+  # guardia final (SPEC §2.4), y el ConditionNode chequea iteration >= 3.
 
   publisher:
     type: agent

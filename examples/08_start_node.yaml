@@ -49,17 +49,7 @@ nodes:
         - name: user_id
           type: str
 
-  # NOTE: nodo de documentación. El runtime lo ignora completamente.
-  # Útil para explicar el flujo en el YAML sin afectar la ejecución.
-  _doc_flow:
-    type: note
-    config:
-      text: |
-        Flujo: start recibe user_message y user_id.
-        classifier lee input_as_text para clasificar el intent.
-        route despacha al agente correcto según intent.
-
-  classifier:
+  # Flujo: start → classifier → route → {soporte_agent, ventas_agent, general_agent} → end
     type: agent
     config:
       model: "anthropic:claude-haiku-4-5-20251001"

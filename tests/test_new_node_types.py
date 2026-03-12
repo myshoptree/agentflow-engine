@@ -1,5 +1,5 @@
 """
-Tests for A1 (NOTE), A2 (node timeout), A3 (SET_STATE), B1 (TRANSFORM),
+Tests for A2 (node timeout), A3 (SET_STATE), B1 (TRANSFORM),
 B2 (START), B5 (explicit execution_id).
 
 Uses mock tools to avoid real LLM calls.
@@ -49,61 +49,6 @@ async def _run(
     runtime = ExecutionRuntime(sm)
     final = await runtime.run(compiled, exec_state)
     return final.status, final.graph_state, final.execution_id
-
-
-# ---------------------------------------------------------------------------
-# A1 — NOTE node
-# ---------------------------------------------------------------------------
-
-def test_note_node_compiles_without_error():
-    """NOTE node should compile without errors (even if unreachable)."""
-    g = GraphDefinition(
-        id="note_test",
-        entry_node="start",
-        nodes={
-            "start": end_node(),
-            "my_note": NodeDefinition(
-                type=NodeType.NOTE,
-                config={"text": "This explains the graph flow"},
-            ),
-        },
-        edges=[],
-    )
-    compiler = GraphCompiler()
-    compiled = compiler.compile(g)
-    # Unreachable NOTE should not produce a warning
-    note_warnings = [
-        w for w in compiled.compilation_warnings if w.node_id == "my_note"
-    ]
-    assert len(note_warnings) == 0
-
-
-@pytest.mark.asyncio
-async def test_note_node_is_skipped_at_runtime():
-    """Runtime should skip NOTE nodes silently."""
-    from agentflow.executors.tool_executor import register_tool
-
-    async def noop(**kwargs) -> dict:
-        return {}
-
-    register_tool("noop_note", noop)
-
-    g = GraphDefinition(
-        id="note_runtime",
-        entry_node="step1",
-        nodes={
-            "step1": tool_node("noop_note"),
-            "end": end_node(),
-        },
-        edges=[Edge(from_node="step1", to_node="end")],
-    )
-    # Add a note node that is not in the main path
-    g.nodes["side_note"] = NodeDefinition(
-        type=NodeType.NOTE,
-        config={"text": "Just a note"},
-    )
-    status, _, _ = await _run(g, {})
-    assert status == ExecutionStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------

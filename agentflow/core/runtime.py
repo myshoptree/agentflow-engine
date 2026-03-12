@@ -134,23 +134,6 @@ class ExecutionRuntime:
 
                 node_def = compiled_node.definition
 
-                # --- NOTE node (A1) — invisible to runtime, skip silently ---
-                if node_def.type == NodeType.NOTE:
-                    next_node = self._resolve_transition(
-                        node_id, compiled_node.outgoing_edges, execution_state, log
-                    )
-                    if next_node is None:
-                        # NOTE with no outgoing edge — treat as end
-                        execution_state.status = ExecutionStatus.COMPLETED
-                        await self._sm.update_status(
-                            execution_state.execution_id, ExecutionStatus.COMPLETED
-                        )
-                        return execution_state
-                    execution_state.current_node = next_node
-                    execution_state.depth += 1
-                    await self._sm.save_execution(execution_state)
-                    continue
-
                 # --- START node (B2) — declarative entry point, inject input_as_text ---
                 if node_def.type == NodeType.START:
                     start_cfg = StartNodeConfig(**node_def.config)

@@ -19,7 +19,6 @@ class NodeType(str, Enum):
     PARALLEL = "parallel"
     HUMAN_INPUT = "human_input"
     END = "end"
-    NOTE = "note"
     SET_STATE = "set_state"
     TRANSFORM = "transform"
     START = "start"
@@ -149,14 +148,6 @@ class EndNodeConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# NOTE node config (A1) — runtime ignores, compile-time transparent
-# ---------------------------------------------------------------------------
-
-class NoteNodeConfig(BaseModel):
-    text: str = ""
-
-
-# ---------------------------------------------------------------------------
 # SET_STATE node config (A3) — writes values directly to graph_state
 # ---------------------------------------------------------------------------
 
@@ -224,7 +215,6 @@ NodeConfig = (
     | HumanInputNodeConfig
     | ConditionNodeConfig
     | EndNodeConfig
-    | NoteNodeConfig
     | SetStateNodeConfig
     | TransformNodeConfig
     | StartNodeConfig
@@ -249,7 +239,6 @@ class NodeDefinition(BaseModel):
             NodeType.HUMAN_INPUT: HumanInputNodeConfig,
             NodeType.CONDITION: ConditionNodeConfig,
             NodeType.END: EndNodeConfig,
-            NodeType.NOTE: NoteNodeConfig,
             NodeType.SET_STATE: SetStateNodeConfig,
             NodeType.TRANSFORM: TransformNodeConfig,
             NodeType.START: StartNodeConfig,
