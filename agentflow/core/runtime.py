@@ -177,13 +177,51 @@ class ExecutionRuntime:
 
                 # --- HumanInput node — suspend (SPEC §6.1) ---
                 if node_def.type == NodeType.HUMAN_INPUT:
-                    # Resolve the next node now so resume can continue from it
-                    next_node = self._resolve_transition(
-                        node_id, compiled_node.outgoing_edges, execution_state, log
-                    )
-                    if next_node is not None:
+                    if execution_state.resuming:
+                        # Already resumed — input is in graph_state, resolve transition normally
+                        execution_state.resuming = False
+                        t0_resume = time.monotonic()
+                        next_node = self._resolve_transition(
+                            node_id, compiled_node.outgoing_edges, execution_state, log
+                        )
+                        duration_ms_resume = (time.monotonic() - t0_resume) * 1000
+                        record_resume = NodeExecutionRecord(
+                            execution_id=execution_state.execution_id,
+                            node_id=node_id,
+                            node_type=node_def.type,
+                            attempt=1,
+                            input_state=dict(execution_state.graph_state),
+                            output_data={},
+                            duration_ms=duration_ms_resume,
+                            started_at=datetime.now(timezone.utc),
+                            completed_at=datetime.now(timezone.utc),
+                        )
+                        await self._sm.record_node_execution(record_resume)
+                        log.node_completed(
+                            node_id,
+                            node_def.type.value,
+                            duration_ms=duration_ms_resume,
+                            attempt=1,
+                            state_updates={},
+                        )
+                        if next_node is None:
+                            execution_state.status = ExecutionStatus.COMPLETED
+                            await self._sm.update_status(
+                                execution_state.execution_id, ExecutionStatus.COMPLETED
+                            )
+                            return execution_state
                         execution_state.current_node = next_node
                         execution_state.depth += 1
+                        await self._sm.save_execution(execution_state)
+                        continue
+                    # First pass — emit trace and suspend, stay on this node for resume
+                    log.node_started(
+                        node_id,
+                        node_def.type.value,
+                        attempt=1,
+                        input_state=dict(execution_state.graph_state),
+                    )
+                    execution_state.current_node = node_id
                     log.execution_suspended(node_id)
                     await self._sm.update_status(
                         execution_state.execution_id, ExecutionStatus.SUSPENDED

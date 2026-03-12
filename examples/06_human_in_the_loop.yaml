@@ -7,9 +7,9 @@ entry_node: analyzer
 # Flujo:
 #   1. analyzer clasifica la solicitud y calcula el impacto
 #   2. human_input suspende → muestra resumen al usuario y pide confirmación
-#   3. check_confirmation evalúa la respuesta humana
-#   4. Si confirma → executor procesa la acción
-#   5. Si cancela → canceller responde con cancelación elegante
+#   3. Al resumir, el edge condicional enruta directamente según la respuesta:
+#      - Approve (si/sí/yes/s) → executor procesa la acción
+#      - Reject (cualquier otra respuesta) → canceller responde con cancelación
 
 state_schema:
   - name: user_request
@@ -57,20 +57,6 @@ nodes:
       input_mapping:
         confirmation: confirmation
 
-  check_confirmation:
-    type: condition
-    config:
-      branches:
-        - condition:
-            operator: or
-            conditions:
-              - {field: state.confirmation, operator: eq, value: "si"}
-              - {field: state.confirmation, operator: eq, value: "sí"}
-              - {field: state.confirmation, operator: eq, value: "yes"}
-              - {field: state.confirmation, operator: eq, value: "s"}
-          target: executor
-      default: canceller
-
   executor:
     type: agent
     config:
@@ -101,10 +87,29 @@ nodes:
 edges:
   - from_node: analyzer
     to_node: await_confirmation
-  - from_node: check_confirmation
+
+  # Approve — edges condicionales (prioridad alta), se evalúan con el input ya en estado
+  - from_node: await_confirmation
     to_node: executor
-  - from_node: check_confirmation
+    condition: {field: state.confirmation, operator: eq, value: "si"}
+    priority: 10
+  - from_node: await_confirmation
+    to_node: executor
+    condition: {field: state.confirmation, operator: eq, value: "sí"}
+    priority: 10
+  - from_node: await_confirmation
+    to_node: executor
+    condition: {field: state.confirmation, operator: eq, value: "yes"}
+    priority: 10
+  - from_node: await_confirmation
+    to_node: executor
+    condition: {field: state.confirmation, operator: eq, value: "s"}
+    priority: 10
+
+  # Reject — fallback incondicional
+  - from_node: await_confirmation
     to_node: canceller
+
   - from_node: executor
     to_node: end
   - from_node: canceller

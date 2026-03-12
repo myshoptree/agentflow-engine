@@ -322,6 +322,7 @@ class ExecutionState(BaseModel):
     error_message: str | None = None
     # Resume support
     suspended_input_key: str | None = None
+    resuming: bool = False  # True when execution was just resumed — human_input resolves transition instead of suspending
 
 
 class StateCheckpoint(BaseModel):

@@ -1,0 +1,118 @@
+{
+  "_id": {
+    "$oid": "69adce6a38ebf07e3aa9ae40"
+  },
+  "account_id": "4b56c08b-2be3-40f1-8078-76ad0b162acf",
+  "island_id": null,
+  "workspace_id": null,
+  "name": "human-in-the-loop",
+  "description": "Human-in-the-loop — confirmación humana antes de ejecutar acción",
+  "definition": {
+    "id": "69adce6a38ebf07e3aa9ae40",
+    "version": "1.0.0",
+    "name": "human-in-the-loop",
+    "entry_node": "analyzer",
+    "nodes": {
+      "analyzer": {
+        "type": "agent",
+        "config": {
+          "model": "openai:gpt-4o-mini",
+          "system_prompt": "Analiza la solicitud del usuario y prepara un resumen de la acción a ejecutar.\nDetermina el nivel de impacto: \"alto\", \"medio\" o \"bajo\".\n\n- alto: acciones irreversibles (eliminar datos, enviar comunicaciones masivas, cargos económicos)\n- medio: cambios importantes pero reversibles (cambiar configuración, modificar registros)\n- bajo: consultas o cambios menores\n\nDevuelve un resumen claro de QUÉ se va a hacer (máximo 2 oraciones) y el nivel de impacto.",
+          "output_schema_inline": {
+            "action_summary": { "type": "str" },
+            "impact_level": { "type": "str" }
+          },
+          "state_output_mapping": {
+            "action_summary": "action_summary",
+            "impact_level": "impact_level"
+          }
+        },
+        "on_error": null
+      },
+      "await_confirmation": {
+        "type": "human_input",
+        "config": {
+          "prompt": "¿Confirmas esta acción?",
+          "input_mapping": {
+            "confirmation": "confirmation"
+          }
+        },
+        "on_error": null
+      },
+      "check_confirmation": {
+        "type": "condition",
+        "config": {
+          "branches": [
+            {
+              "condition": {
+                "operator": "or",
+                "conditions": [
+                  { "field": "state.confirmation", "operator": "eq", "value": "si" },
+                  { "field": "state.confirmation", "operator": "eq", "value": "sí" },
+                  { "field": "state.confirmation", "operator": "eq", "value": "yes" },
+                  { "field": "state.confirmation", "operator": "eq", "value": "s" }
+                ]
+              },
+              "target": "executor"
+            }
+          ],
+          "default": "canceller"
+        },
+        "on_error": null
+      },
+      "executor": {
+        "type": "agent",
+        "config": {
+          "model": "openai:gpt-4o-mini",
+          "system_prompt": "El usuario confirmó la acción. Simula la ejecución y reporta el resultado de forma clara: qué se hizo, cuándo y con qué resultado. Sé específico y profesional.",
+          "output_schema_inline": {
+            "result": { "type": "str" }
+          },
+          "state_output_mapping": {
+            "result": "result"
+          }
+        },
+        "on_error": null
+      },
+      "canceller": {
+        "type": "agent",
+        "config": {
+          "model": "openai:gpt-4o-mini",
+          "system_prompt": "El usuario canceló la acción. Confirma la cancelación de forma amable, asegura que no se realizó ningún cambio y ofrece asistencia adicional.",
+          "output_schema_inline": {
+            "result": { "type": "str" }
+          },
+          "state_output_mapping": {
+            "result": "result"
+          }
+        },
+        "on_error": null
+      },
+      "end": {
+        "type": "end",
+        "config": {},
+        "on_error": null
+      }
+    },
+    "edges": [
+      { "from_node": "analyzer", "to_node": "await_confirmation", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
+      { "from_node": "await_confirmation", "to_node": "check_confirmation", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
+      { "from_node": "check_confirmation", "to_node": "executor", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
+      { "from_node": "check_confirmation", "to_node": "canceller", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
+      { "from_node": "executor", "to_node": "end", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 },
+      { "from_node": "canceller", "to_node": "end", "condition": null, "condition_cel": null, "condition_language": "dsl", "priority": 0 }
+    ],
+    "state_schema": [
+      { "name": "user_request", "type": "str", "default": null, "required": false },
+      { "name": "action_summary", "type": "str", "default": null, "required": false },
+      { "name": "impact_level", "type": "str", "default": null, "required": false },
+      { "name": "confirmation", "type": "str", "default": null, "required": false },
+      { "name": "result", "type": "str", "default": null, "required": false }
+    ],
+    "global_timeout_seconds": 300,
+    "max_depth": 50
+  },
+  "version": "1.0.0",
+  "created_at": { "$date": "2026-03-08T19:30:50.767Z" },
+  "updated_at": { "$date": "2026-03-12T15:00:00.000Z" }
+}

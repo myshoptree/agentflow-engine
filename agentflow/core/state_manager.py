@@ -217,6 +217,7 @@ class InMemoryStateManager(StateManagerProtocol):
         state.status = ExecutionStatus.RUNNING
         state.updated_at = datetime.utcnow()
         state.suspended_input_key = None
+        state.resuming = True
         return copy.deepcopy(state)
 
     async def cancel(self, execution_id: str) -> None:
