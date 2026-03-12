@@ -214,13 +214,24 @@ class ExecutionRuntime:
                         execution_state.depth += 1
                         await self._sm.save_execution(execution_state)
                         continue
-                    # First pass — emit trace and suspend, stay on this node for resume
+                    # First pass — emit trace, record started, suspend
+                    t0_suspend = time.monotonic()
                     log.node_started(
                         node_id,
                         node_def.type.value,
                         attempt=1,
                         input_state=dict(execution_state.graph_state),
                     )
+                    record_suspend = NodeExecutionRecord(
+                        execution_id=execution_state.execution_id,
+                        node_id=node_id,
+                        node_type=node_def.type,
+                        attempt=1,
+                        input_state=dict(execution_state.graph_state),
+                        duration_ms=(time.monotonic() - t0_suspend) * 1000,
+                        started_at=datetime.now(timezone.utc),
+                    )
+                    await self._sm.record_node_execution(record_suspend)
                     execution_state.current_node = node_id
                     log.execution_suspended(node_id)
                     await self._sm.update_status(
