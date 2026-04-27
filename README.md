@@ -1,4 +1,4 @@
-# AgentFlow
+# AgentNodes
 
 Motor de orquestación de agentes LLM que ejecuta grafos dirigidos con estado compartido y contratos estructurados. No es un chatbot builder — es un runtime de orquestación (AI Workflow Operating System).
 
